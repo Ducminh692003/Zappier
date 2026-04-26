@@ -47,6 +47,8 @@ AUTO_REAUTH_STATUS_MESSAGE = (
 MAX_AUTO_REAUTH_RETRIES = 2
 STANDARD_STREAM_WATCHDOG_SECONDS = 20.0
 IMAGE_STREAM_WATCHDOG_SECONDS = 45.0
+PRO_FULL_SIZE_CACHE_ATTEMPTS = 8
+PRO_FULL_SIZE_CACHE_RETRY_SECONDS = 8.0
 
 
 def append_runtime_log(level: str, message: str) -> None:
@@ -1208,27 +1210,75 @@ class GeminiLocalService:
 
         existing_path = self._generated_image_file_path(record)
         if existing_path is not None:
-            record["cacheStatus"] = "ready"
-            return record
+            if record.get("usePro") and normalize_image_quality(record.get("quality")) != "full":
+                with suppress(OSError):
+                    existing_path.unlink()
+                record["cachedRelativePath"] = None
+                record["quality"] = "pending"
+                record["cacheStatus"] = "caching"
+            else:
+                record["cacheStatus"] = "ready"
+                return record
 
-        image = self._build_generated_image_from_record(record)
+        requires_full_quality = bool(record.get("usePro"))
+        max_attempts = PRO_FULL_SIZE_CACHE_ATTEMPTS if requires_full_quality else 1
+        saved_path: str | None = None
+        image: GeneratedImage | None = None
+        quality = "unknown"
+
         target_dir = IMAGE_CACHE_DIR / record["requestTag"]
         target_dir.mkdir(parents=True, exist_ok=True)
-        async with self._hold_session_activity(
-            f"generated image save ({record['requestTag']} #{record['index'] + 1})",
-            record.get("requestSource"),
-        ):
-            saved_path = await image.save(
-                path=str(target_dir),
-                filename=f"image_{record['index']}",
-                verbose=False,
-                full_size=True,
+
+        for attempt in range(1, max_attempts + 1):
+            image = self._build_generated_image_from_record(record)
+            async with self._hold_session_activity(
+                f"generated image save ({record['requestTag']} #{record['index'] + 1})",
+                record.get("requestSource"),
+            ):
+                saved_path = await image.save(
+                    path=str(target_dir),
+                    filename=f"image_{record['index']}",
+                    verbose=False,
+                    full_size=True,
+                )
+
+            quality = normalize_image_quality(getattr(image, "saved_quality", None))
+            if not requires_full_quality or quality == "full":
+                break
+
+            with suppress(OSError):
+                Path(saved_path).unlink()
+
+            if attempt < max_attempts:
+                record["cacheStatus"] = "caching"
+                append_runtime_log(
+                    "INFO",
+                    "Gemini Pro full-size image "
+                    f"{record['index'] + 1} is not ready yet (got {quality}). "
+                    f"Retrying {attempt + 1}/{max_attempts}.",
+                )
+                await asyncio.sleep(PRO_FULL_SIZE_CACHE_RETRY_SECONDS)
+
+        if saved_path is None or image is None:
+            raise RuntimeError("Generated image local save did not produce a file.")
+
+        if requires_full_quality and quality != "full":
+            record["cachedRelativePath"] = None
+            record["quality"] = "pending"
+            record["cacheStatus"] = "pending"
+            raise RuntimeError(
+                "Gemini Pro full-size image was not ready after "
+                f"{max_attempts} attempts. Please retry the download in a moment."
             )
 
-        relative_path = Path(saved_path).relative_to(IMAGE_CACHE_DIR).as_posix()
+        existing_path = Path(saved_path)
+        if not existing_path.exists():
+            raise RuntimeError("Generated image local save finished but the file is missing.")
+
+        relative_path = existing_path.relative_to(IMAGE_CACHE_DIR).as_posix()
         record["cachedRelativePath"] = relative_path
-        record["downloadName"] = Path(saved_path).name
-        record["quality"] = normalize_image_quality(getattr(image, "saved_quality", None))
+        record["downloadName"] = existing_path.name
+        record["quality"] = quality
         record["sourceUrl"] = image.url
         record["previewUrl"] = getattr(image, "preview_url", "") or record.get("previewUrl")
         record["cacheStatus"] = "ready"

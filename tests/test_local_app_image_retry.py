@@ -680,6 +680,70 @@ class TestLocalAppImageRetry(unittest.IsolatedAsyncioTestCase):
                         child.unlink()
                 request_dir.rmdir()
 
+    async def test_pro_full_size_cache_retries_preview_result(self):
+        service = local_app.GeminiLocalService()
+        service.client = make_fake_client()
+        request_dir = local_app.IMAGE_CACHE_DIR / "generated-pro-retry"
+        attempts = {"count": 0}
+
+        class FakeRetryGeneratedImage(local_app.GeneratedImage):
+            async def save(
+                self,
+                path="temp",
+                filename=None,
+                verbose=False,
+                client=None,
+                **kwargs,
+            ):
+                attempts["count"] += 1
+                path_obj = Path(path)
+                path_obj.mkdir(parents=True, exist_ok=True)
+                dest = path_obj / f"{Path(filename).stem}.png"
+                if attempts["count"] == 1:
+                    dest.write_bytes(b"preview")
+                    self.saved_quality = "preview"
+                else:
+                    dest.write_bytes(b"full")
+                    self.saved_quality = "full"
+                self.preview_url = self.preview_url or self.url
+                return str(dest.resolve())
+
+        try:
+            with (
+                patch.object(local_app, "GeneratedImage", FakeRetryGeneratedImage),
+                patch.object(local_app, "PRO_FULL_SIZE_CACHE_RETRY_SECONDS", 0),
+            ):
+                image = FakeRetryGeneratedImage(
+                    url="https://lh3.googleusercontent.com/gg-dl/token",
+                    preview_url="https://lh3.googleusercontent.com/gg-dl/token",
+                    title="[Generated Image 0]",
+                    alt="red-lantern",
+                    cid="cid",
+                    rid="rid",
+                    rcid="rcid",
+                    image_id="image-id",
+                )
+                record = service._register_generated_image(
+                    image,
+                    "generated-pro-retry",
+                    0,
+                    use_pro=True,
+                )
+
+                await service._cache_generated_image_record(record["token"])
+
+            cached_path = local_app.IMAGE_CACHE_DIR / record["cachedRelativePath"]
+            self.assertEqual(attempts["count"], 2)
+            self.assertEqual(cached_path.read_bytes(), b"full")
+            self.assertEqual(record["quality"], "full")
+            self.assertEqual(record["cacheStatus"], "ready")
+        finally:
+            if request_dir.exists():
+                for child in request_dir.iterdir():
+                    if child.is_file():
+                        child.unlink()
+                request_dir.rmdir()
+
     async def test_reprobe_auth_is_blocked_while_session_is_busy(self):
         service = local_app.GeminiLocalService()
         service.client = SimpleNamespace(configured_cookie_fingerprint="stale")
