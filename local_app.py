@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from gemini_webapi import GeminiClient, logger as gemini_logger
+from gemini_webapi import GeminiClient, StreamSuspendedError, logger as gemini_logger
 from gemini_webapi.constants import AccountStatus, Headers, Model
 from gemini_webapi.types import GeneratedImage
 from gemini_webapi.utils import build_cookie_fingerprint
@@ -964,6 +964,9 @@ class GeminiLocalService:
     ) -> bool:
         if latest_output is not None or partial_text or partial_thoughts:
             return False
+
+        if isinstance(exc, StreamSuspendedError):
+            return True
 
         message = str(exc or "")
         if AUTO_REAUTH_LOG_FRAGMENT in message or "Stream suspended (" in message:

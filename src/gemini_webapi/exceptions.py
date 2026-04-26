@@ -22,6 +22,29 @@ class ImageGenerationError(APIError):
     pass
 
 
+class StreamSuspendedError(Exception):
+    """
+    Exception for a Gemini stream that stopped before a recoverable chat id was available.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        completed: bool | None = None,
+        final_chunk: bool | None = None,
+        thinking: bool | None = None,
+        queueing: bool | None = None,
+        request_id: int | str | None = None,
+    ):
+        super().__init__(message)
+        self.completed = completed
+        self.final_chunk = final_chunk
+        self.thinking = thinking
+        self.queueing = queueing
+        self.request_id = request_id
+
+
 class GeminiError(Exception):
     """
     Exception for errors returned from Gemini server which are not handled by the package.

@@ -34,6 +34,7 @@ from .exceptions import (
     AuthError,
     GeminiError,
     ModelInvalid,
+    StreamSuspendedError,
     TemporarilyBlocked,
     TimeoutError,
     UsageLimitExceeded,
@@ -1367,12 +1368,19 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                 await asyncio.sleep(sleep_time)
                             break
                         else:
-                            logger.debug(
-                                f"Stream suspended (completed={is_completed}, final_chunk={is_final_chunk}, thinking={is_thinking}, queueing={is_queueing}). "
+                            suspended_message = (
+                                f"Stream suspended (completed={is_completed}, final_chunk={is_final_chunk}, "
+                                f"thinking={is_thinking}, queueing={is_queueing}). "
                                 f"No CID found to recover. (Request ID: {_reqid})"
                             )
-                            raise APIError(
-                                "The original request may have been silently aborted by Google."
+                            logger.debug(suspended_message)
+                            raise StreamSuspendedError(
+                                "The original request may have been silently aborted by Google.",
+                                completed=is_completed,
+                                final_chunk=is_final_chunk,
+                                thinking=is_thinking,
+                                queueing=is_queueing,
+                                request_id=_reqid,
                             )
 
                     # Full raw HTTP response text at completion
@@ -1391,7 +1399,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                     "The request timed out while waiting for Gemini to respond. This often happens with very long prompts "
                     "or complex file analysis. Try increasing the 'timeout' value when initializing GeminiClient."
                 )
-            except (UsageLimitExceeded, GeminiError, APIError):
+            except (UsageLimitExceeded, GeminiError, APIError, StreamSuspendedError):
                 if not has_generated_text and chat and chat_backup:
                     chat.metadata = chat_backup["metadata"]
                     chat.cid = chat_backup["cid"]

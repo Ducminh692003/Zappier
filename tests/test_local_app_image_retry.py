@@ -47,6 +47,24 @@ class FakeAbortChat:
         raise RuntimeError("The original request may have been silently aborted by Google.")
 
 
+class FakeQueueingSuspendedChat:
+    def __init__(self):
+        self.calls = []
+
+    async def send_message_stream(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        if False:
+            yield None
+        raise local_app.StreamSuspendedError(
+            "The original request may have been silently aborted by Google.",
+            completed=False,
+            final_chunk=False,
+            thinking=False,
+            queueing=True,
+            request_id=725336,
+        )
+
+
 class FakeSavedImage:
     def __init__(self, saved_path: str):
         self.saved_path = saved_path
@@ -720,6 +738,88 @@ class TestLocalAppImageRetry(unittest.IsolatedAsyncioTestCase):
                 for event in events
             )
         )
+        final_event = next(event for event in events if event.get("type") == "final")
+        self.assertEqual(final_event["text"], "done")
+
+    async def test_sync_request_reauths_after_typed_queueing_suspend_without_log(self):
+        service = local_app.GeminiLocalService()
+        abort_chat = FakeQueueingSuspendedChat()
+        recovered_chat = FakeChat()
+        fake_client = SimpleNamespace(timeout=30.0, watchdog_timeout=30.0)
+
+        service.client = fake_client
+        service.chat = abort_chat
+        service.current_model = "gemini-3-flash"
+        service.ensure_ready = AsyncMock()
+        service.check_history = AsyncMock(
+            return_value=local_app.build_history_state(
+                cid="",
+                status="missing",
+                message="missing",
+                checked=True,
+                saved=False,
+            )
+        )
+
+        async def fake_reprobe(force=False):
+            service.chat = recovered_chat
+            return True
+
+        service.reprobe_auth = AsyncMock(side_effect=fake_reprobe)
+
+        payload = local_app.ChatRequest(
+            prompt="Generate an image after queueing recovery.",
+            model="gemini-3-flash",
+            timeout_seconds=60,
+        )
+
+        result = await service.ask(payload)
+
+        self.assertEqual(result["text"], "done")
+        self.assertEqual(len(abort_chat.calls), 1)
+        self.assertEqual(len(recovered_chat.calls), 1)
+        service.reprobe_auth.assert_awaited_once_with(force=True)
+
+    async def test_stream_request_reauths_after_typed_queueing_suspend_without_log(self):
+        service = local_app.GeminiLocalService()
+        abort_chat = FakeQueueingSuspendedChat()
+        recovered_chat = FakeChat()
+        fake_client = SimpleNamespace(timeout=30.0, watchdog_timeout=30.0)
+
+        service.client = fake_client
+        service.chat = abort_chat
+        service.current_model = "gemini-3-flash"
+        service.ensure_ready = AsyncMock()
+        service.check_history = AsyncMock(
+            return_value=local_app.build_history_state(
+                cid="",
+                status="missing",
+                message="missing",
+                checked=True,
+                saved=False,
+            )
+        )
+
+        async def fake_reprobe(force=False):
+            service.chat = recovered_chat
+            return True
+
+        service.reprobe_auth = AsyncMock(side_effect=fake_reprobe)
+
+        payload = local_app.ChatRequest(
+            prompt="Generate an image after stream queueing recovery.",
+            model="gemini-3-flash",
+            timeout_seconds=60,
+        )
+
+        events = []
+        async for event in service.stream_chat_events(payload):
+            events.append(event)
+
+        self.assertEqual(len(abort_chat.calls), 1)
+        self.assertEqual(len(recovered_chat.calls), 1)
+        service.reprobe_auth.assert_awaited_once_with(force=True)
+        self.assertTrue(any(event.get("message") == local_app.AUTO_REAUTH_STATUS_MESSAGE for event in events))
         final_event = next(event for event in events if event.get("type") == "final")
         self.assertEqual(final_event["text"], "done")
 
