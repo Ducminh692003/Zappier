@@ -124,7 +124,7 @@ class ChatMixin:
                     RPCData(
                         rpcid=GRPC.READ_CHAT,
                         payload=json.dumps(
-                            [cid, limit, None, 1, [1], [4], None, 1]
+                            [cid, limit, None, 1, [0], [4], None, 1]
                         ).decode("utf-8"),
                     ),
                 ]

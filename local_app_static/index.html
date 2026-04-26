@@ -1,0 +1,2491 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <link rel="preconnect" href="https://lh3.googleusercontent.com" crossorigin />
+    <link rel="dns-prefetch" href="//lh3.googleusercontent.com" />
+    <link rel="preconnect" href="https://lh3.usercontent.google.com" crossorigin />
+    <link rel="dns-prefetch" href="//lh3.usercontent.google.com" />
+    <title>Gemini Local UI</title>
+    <style>
+      :root {
+        --bg: #edf2f8;
+        --paper: rgba(248, 250, 252, 0.8);
+        --paper-strong: rgba(255, 255, 255, 0.84);
+        --ink: #0f172a;
+        --muted: #64748b;
+        --accent: #0a84ff;
+        --accent-soft: rgba(10, 132, 255, 0.1);
+        --warn: #b42318;
+        --warn-soft: rgba(245, 112, 108, 0.14);
+        --line: rgba(15, 23, 42, 0.08);
+        --line-strong: rgba(15, 23, 42, 0.14);
+        --shadow: 0 20px 50px rgba(15, 23, 42, 0.08);
+        --radius: 26px;
+        --font-ui:
+          "SF Pro Text",
+          "SF Pro Display",
+          -apple-system,
+          BlinkMacSystemFont,
+          "Helvetica Neue",
+          Helvetica,
+          Arial,
+          sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        overflow: hidden;
+        font-family: var(--font-ui);
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(10, 132, 255, 0.14), transparent 28%),
+          radial-gradient(circle at bottom right, rgba(34, 211, 238, 0.14), transparent 28%),
+          linear-gradient(180deg, #f8fbff 0%, #eef3f8 46%, #e9eef6 100%);
+      }
+
+      .shell {
+        width: min(1480px, calc(100vw - 28px));
+        margin: 14px auto;
+        display: grid;
+        grid-template-columns: 320px minmax(0, 1fr);
+        gap: 14px;
+        height: calc(100vh - 28px);
+      }
+
+      .panel {
+        background: var(--paper);
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(24px);
+        overflow: hidden;
+      }
+
+      .sidebar {
+        padding: 0;
+        overflow: hidden;
+      }
+
+      .sidebar-scroll {
+        height: 100%;
+        padding: 18px 10px 18px 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        max-height: calc(100vh - 28px);
+        overflow: auto;
+      }
+
+      .sidebar-scroll,
+      .log,
+      .live-log {
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+
+      .sidebar-scroll::-webkit-scrollbar,
+      .log::-webkit-scrollbar,
+      .live-log::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+        background: transparent;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .hero {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.6rem, 3vw, 2.2rem);
+        line-height: 1.02;
+        letter-spacing: -0.04em;
+        font-weight: 700;
+      }
+
+      .hero p,
+      .hint,
+      .credential-preview,
+      .account-note,
+      .field-note {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .app-version {
+        font-size: 11px;
+        letter-spacing: 0.08em;
+      }
+
+      .status-card,
+      .credentials,
+      .controls,
+      .hint-card,
+      .live-panel {
+        padding: 16px;
+        border-radius: 22px;
+        background: var(--paper-strong);
+        border: 1px solid var(--line);
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 7px 11px;
+        border-radius: 999px;
+        border: 1px solid rgba(22, 101, 52, 0.12);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(240, 253, 244, 0.72));
+        color: #166534;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.92),
+          0 8px 18px rgba(34, 197, 94, 0.08);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .status-pill::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: #22c55e;
+        box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.14);
+      }
+
+      .status-pill.offline {
+        border-color: rgba(180, 35, 24, 0.12);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(254, 242, 242, 0.8));
+        color: var(--warn);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.96),
+          0 8px 18px rgba(180, 35, 24, 0.08);
+      }
+
+      .status-pill.offline::before {
+        background: #f04438;
+        box-shadow: 0 0 0 4px rgba(240, 68, 56, 0.12);
+      }
+
+      .status-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .status-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: nowrap;
+      }
+
+      .status-label {
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+
+      .status-actions {
+        margin-top: 14px;
+        justify-content: flex-start;
+      }
+
+      .credentials,
+      .controls,
+      .live-panel {
+        display: grid;
+        gap: 14px;
+      }
+
+      .section-title {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .section-title strong {
+        font-size: 15px;
+      }
+
+      label {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--muted);
+      }
+
+      select,
+      textarea,
+      input,
+      button {
+        font: inherit;
+      }
+
+      select,
+      textarea,
+      input[type="number"] {
+        width: 100%;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.92);
+        padding: 13px 15px;
+        color: var(--ink);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+      }
+
+      textarea {
+        min-height: 132px;
+        resize: vertical;
+        line-height: 1.6;
+      }
+
+      #cookie-blob {
+        min-height: 190px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 13px;
+      }
+
+      .inline-fields {
+        display: grid;
+        grid-template-columns: 1fr 120px;
+        gap: 12px;
+      }
+
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .actions,
+      .mini-actions {
+        display: flex;
+        gap: 12px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 18px;
+        padding: 13px 18px;
+        cursor: pointer;
+        transition:
+          transform 140ms ease,
+          opacity 140ms ease,
+          box-shadow 160ms ease,
+          background 160ms ease,
+          border-color 160ms ease,
+          color 160ms ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.65;
+      }
+
+      .primary {
+        background: linear-gradient(135deg, #0a84ff, #2563eb);
+        color: white;
+        font-weight: 700;
+        flex: 1;
+        box-shadow: 0 12px 30px rgba(37, 99, 235, 0.24);
+      }
+
+      .ghost {
+        background: rgba(15, 23, 42, 0.05);
+        color: var(--accent);
+        font-weight: 700;
+      }
+
+      .action-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        border-radius: 16px;
+        font-size: 13px;
+        letter-spacing: -0.01em;
+        font-weight: 700;
+        border: 1px solid transparent;
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+      }
+
+      .action-button:active {
+        transform: translateY(0);
+      }
+
+      .action-button-subtle {
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.72));
+        color: #0f172a;
+        border-color: rgba(15, 23, 42, 0.09);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.92),
+          0 10px 24px rgba(15, 23, 42, 0.06);
+      }
+
+      .action-button-subtle:hover {
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 247, 251, 0.9));
+        border-color: rgba(15, 23, 42, 0.14);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.98),
+          0 14px 28px rgba(15, 23, 42, 0.08);
+      }
+
+      .action-button-strong {
+        width: 100%;
+        background:
+          linear-gradient(135deg, rgba(10, 132, 255, 0.18), rgba(59, 130, 246, 0.1)),
+          rgba(255, 255, 255, 0.82);
+        color: #0757cf;
+        border-color: rgba(10, 132, 255, 0.18);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.95),
+          0 14px 32px rgba(10, 132, 255, 0.12);
+      }
+
+      .action-button-strong:hover {
+        background:
+          linear-gradient(135deg, rgba(10, 132, 255, 0.22), rgba(59, 130, 246, 0.14)),
+          rgba(255, 255, 255, 0.9);
+        border-color: rgba(10, 132, 255, 0.26);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.98),
+          0 18px 34px rgba(10, 132, 255, 0.16);
+      }
+
+      .status-ghost {
+        min-width: 98px;
+        color: #10233f;
+      }
+
+      .cookie-action {
+        min-width: 100%;
+      }
+
+      .live-panel {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .main {
+        height: 100%;
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        overflow: hidden;
+        position: relative;
+      }
+
+      .main-header {
+        padding: 18px 22px 16px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .main-header h2 {
+        margin: 0;
+        font-size: 1.3rem;
+        letter-spacing: -0.03em;
+        font-weight: 700;
+      }
+
+      .log {
+        min-height: 0;
+        overflow: auto;
+        padding: 20px 22px 188px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .empty {
+        padding: 22px;
+        border: 1px dashed var(--line-strong);
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.58);
+        color: var(--muted);
+      }
+
+      .message {
+        display: grid;
+        gap: 10px;
+        animation: rise 220ms ease;
+      }
+
+      .bubble {
+        max-width: min(840px, 100%);
+        padding: 15px 17px;
+        border-radius: 20px;
+        line-height: 1.58;
+        white-space: pre-wrap;
+        border: 1px solid var(--line);
+        font-size: 14px;
+      }
+
+      .user .bubble {
+        margin-left: auto;
+        background: linear-gradient(135deg, #111827, #1f2937);
+        color: white;
+        border-top-right-radius: 12px;
+      }
+
+      .assistant .bubble,
+      .system .bubble {
+        background: rgba(255, 255, 255, 0.92);
+        border-top-left-radius: 12px;
+      }
+
+      .assistant.streaming .bubble {
+        background: linear-gradient(135deg, rgba(10, 132, 255, 0.07), rgba(99, 102, 241, 0.08));
+      }
+
+      .system .bubble {
+        background: rgba(10, 132, 255, 0.06);
+      }
+
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .history-chip {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(15, 118, 110, 0.08);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        width: fit-content;
+      }
+
+      .history-chip.warning {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+
+      .history-chip.pending {
+        background: rgba(214, 145, 82, 0.12);
+        color: #8a4b17;
+      }
+
+      .gallery {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 12px;
+      }
+
+      .gallery-card {
+        display: grid;
+        gap: 10px;
+        padding: 10px;
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.88);
+        border: 1px solid var(--line);
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+      }
+
+      .gallery-link {
+        display: block;
+        border-radius: 18px;
+        overflow: hidden;
+        cursor: zoom-in;
+        background:
+          linear-gradient(135deg, rgba(10, 132, 255, 0.06), rgba(99, 102, 241, 0.08)),
+          repeating-linear-gradient(
+            45deg,
+            rgba(255, 255, 255, 0.9),
+            rgba(255, 255, 255, 0.9) 10px,
+            rgba(245, 241, 232, 0.92) 10px,
+            rgba(245, 241, 232, 0.92) 20px
+          );
+      }
+
+      .gallery img {
+        width: 100%;
+        height: 180px;
+        object-fit: contain;
+        display: block;
+      }
+
+      .gallery-meta {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .gallery-caption {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .gallery-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .gallery-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(15, 118, 110, 0.16);
+        background: rgba(15, 118, 110, 0.08);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .gallery-button.disabled {
+        opacity: 0.55;
+        cursor: wait;
+        pointer-events: auto;
+      }
+
+      .image-viewer {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .image-viewer[hidden] {
+        display: none;
+      }
+
+      .image-viewer-backdrop {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(circle at 20% 0%, rgba(10, 132, 255, 0.18), transparent 28%),
+          rgba(15, 23, 42, 0.66);
+        backdrop-filter: blur(18px);
+      }
+
+      .image-viewer-panel {
+        position: relative;
+        z-index: 1;
+        width: min(1100px, calc(100vw - 42px));
+        max-height: calc(100vh - 42px);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        gap: 14px;
+        padding: 14px;
+        border-radius: 28px;
+        border: 1px solid rgba(255, 255, 255, 0.5);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.92));
+        box-shadow: 0 34px 90px rgba(2, 6, 23, 0.34);
+      }
+
+      .image-viewer-head,
+      .image-viewer-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .image-viewer-head strong {
+        font-size: 14px;
+      }
+
+      .image-viewer-close {
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.8);
+        color: var(--ink);
+        min-height: 38px;
+        padding: 0 14px;
+        border-radius: 999px;
+        font-weight: 700;
+        box-shadow: none;
+      }
+
+      .image-viewer-frame {
+        min-height: 0;
+        border-radius: 22px;
+        overflow: auto;
+        background:
+          linear-gradient(135deg, rgba(10, 132, 255, 0.06), rgba(99, 102, 241, 0.08)),
+          repeating-linear-gradient(
+            45deg,
+            rgba(255, 255, 255, 0.9),
+            rgba(255, 255, 255, 0.9) 14px,
+            rgba(245, 241, 232, 0.92) 14px,
+            rgba(245, 241, 232, 0.92) 28px
+          );
+      }
+
+      .image-viewer-frame img {
+        width: 100%;
+        max-height: calc(100vh - 210px);
+        object-fit: contain;
+        display: block;
+      }
+
+      .image-viewer-caption {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      details {
+        background: rgba(15, 118, 110, 0.05);
+        border: 1px solid rgba(15, 118, 110, 0.14);
+        border-radius: 18px;
+        padding: 12px 14px;
+      }
+
+      details summary {
+        cursor: pointer;
+        font-weight: 700;
+        color: var(--accent);
+      }
+
+      .error {
+        color: var(--warn);
+        background: var(--warn-soft);
+        border-color: rgba(162, 63, 50, 0.16);
+      }
+
+      .live-log {
+        display: grid;
+        flex: 1 1 auto;
+        gap: 8px;
+        max-height: none;
+        min-height: 0;
+        min-width: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 4px;
+      }
+
+      .live-log-item {
+        min-width: 0;
+        padding: 10px 12px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid var(--line);
+        font-size: 13px;
+        line-height: 1.5;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
+      .live-log-item strong {
+        color: var(--accent);
+      }
+
+      .live-log-item.warning strong,
+      .live-log-item.error strong {
+        color: var(--warn);
+      }
+
+      .composer {
+        position: sticky;
+        bottom: 0;
+        z-index: 5;
+        padding: 16px 18px 18px;
+        border-top: 1px solid var(--line);
+        background:
+          linear-gradient(180deg, rgba(237, 242, 248, 0) 0%, rgba(237, 242, 248, 0.86) 18%, rgba(248, 250, 252, 0.98) 100%);
+        backdrop-filter: blur(28px);
+      }
+
+      .composer-shell {
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 28px;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.9));
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.92),
+          0 18px 38px rgba(15, 23, 42, 0.08);
+        padding: 14px 14px 12px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .composer-input {
+        display: grid;
+        gap: 8px;
+      }
+
+      .composer-footer {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: end;
+      }
+
+      .composer-meta {
+        display: flex;
+        align-items: stretch;
+        gap: 10px;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+
+      .composer-control {
+        display: grid;
+        gap: 4px;
+        min-width: 0;
+        padding: 10px 12px;
+        border-radius: 18px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        background: rgba(255, 255, 255, 0.86);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+      }
+
+      .composer-control:focus-within,
+      .composer-toggle:focus-within {
+        border-color: rgba(10, 132, 255, 0.24);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.96),
+          0 0 0 3px rgba(10, 132, 255, 0.08);
+      }
+
+      .composer-control-label {
+        display: block;
+        font-size: 10px;
+        line-height: 1;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .composer-control.model-control {
+        flex: 1 1 220px;
+      }
+
+      .composer-control.timeout-control {
+        flex: 0 0 112px;
+      }
+
+      .composer-control select,
+      .composer-control input[type="number"] {
+        border: 0;
+        background: transparent;
+        border-radius: 0;
+        padding: 0;
+        min-height: 0;
+        box-shadow: none;
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      .composer-control select:focus,
+      .composer-control input[type="number"]:focus,
+      #prompt:focus {
+        outline: none;
+      }
+
+      .composer-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 56px;
+        padding: 0 14px;
+        border-radius: 18px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        background: rgba(255, 255, 255, 0.86);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        white-space: nowrap;
+      }
+
+      .composer-toggle input {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        accent-color: var(--accent);
+      }
+
+      .composer-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+      }
+
+      .composer-reset {
+        min-width: 132px;
+        flex: 0 0 auto;
+      }
+
+      .composer-send {
+        min-width: 168px;
+        min-height: 56px;
+        border-radius: 18px;
+        flex: 0 0 auto;
+        padding-inline: 24px;
+      }
+
+      #prompt {
+        min-height: 84px;
+        max-height: 240px;
+        resize: none;
+        border-radius: 22px;
+        padding: 16px 18px;
+        font-size: 15px;
+        line-height: 1.6;
+        background: rgba(255, 255, 255, 0.92);
+      }
+
+      .sidebar-copy {
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @media (max-width: 980px) {
+        .shell {
+          width: min(100vw - 20px, 1480px);
+          grid-template-columns: 1fr;
+          height: calc(100vh - 20px);
+        }
+
+        .main {
+          height: min(70vh, 900px);
+        }
+
+        .sidebar {
+          max-height: none;
+        }
+
+        .sidebar-scroll {
+          max-height: none;
+        }
+
+        .log {
+          padding-bottom: 210px;
+        }
+
+        .composer-footer {
+          grid-template-columns: 1fr;
+        }
+
+        .composer-actions {
+          justify-content: stretch;
+        }
+
+        .composer-reset,
+        .composer-send {
+          flex: 1 1 0;
+          min-width: 0;
+        }
+      }
+
+      @media (max-width: 620px) {
+        body {
+          overflow: auto;
+        }
+
+        .inline-fields {
+          grid-template-columns: 1fr;
+        }
+
+        .composer-meta {
+          flex-direction: column;
+        }
+
+        .composer-control.timeout-control,
+        .composer-toggle {
+          width: 100%;
+        }
+
+        .actions,
+        .mini-actions {
+          flex-direction: column;
+        }
+
+        .main-header {
+          padding: 16px 16px 14px;
+        }
+
+        .log {
+          padding: 16px 16px 220px;
+        }
+
+        .composer {
+          padding: 12px;
+        }
+
+        .shell {
+          height: auto;
+          min-height: calc(100vh - 16px);
+        }
+
+        .main {
+          height: min(68vh, 780px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="panel sidebar">
+        <div class="sidebar-scroll">
+        <div class="hero">
+          <h1>1Lab</h1>
+          <span id="app-version" class="app-version" hidden></span>
+        </div>
+
+        <section class="status-card">
+          <div class="status-head">
+            <strong class="status-label">Status</strong>
+            <div id="status-pill" class="status-pill">Ready</div>
+          </div>
+          <div class="mini-actions status-actions">
+            <button id="reprobe-auth" class="action-button action-button-strong cookie-action" type="button">Re-auth</button>
+          </div>
+        </section>
+
+        <section class="live-panel">
+          <div class="section-title">
+            <strong>Live Request Log</strong>
+          </div>
+          <div id="live-log" class="live-log">
+            <div class="live-log-item"><strong>Idle</strong> Waiting for the next request.</div>
+          </div>
+        </section>
+
+        <section class="credentials">
+          <div class="section-title">
+            <strong>Cookies</strong>
+          </div>
+
+          <div>
+            <label for="cookie-blob">Paste cookie export</label>
+            <textarea
+              id="cookie-blob"
+              placeholder="Paste rows like __Secure-1PSID[TAB]value[TAB].google.com... or a cookies JSON blob."
+            ></textarea>
+          </div>
+
+          <label class="toggle">
+            <input type="checkbox" id="persist-cookies" checked />
+            Save parsed cookies locally for the next app restart
+          </label>
+
+          <div class="mini-actions">
+            <button id="apply-cookies" class="action-button action-button-strong cookie-action" type="button">Apply Cookies</button>
+          </div>
+        </section>
+
+        </div>
+      </aside>
+
+      <main class="panel main">
+        <div class="main-header">
+          <div>
+            <div class="eyebrow">Conversation</div>
+            <h2>Live local session</h2>
+          </div>
+          <div id="active-model" class="meta">Model: unspecified</div>
+        </div>
+        <div id="log" class="log">
+          <div class="empty">
+            Start a prompt below. Replies, thoughts, images, and request progress will stream into this
+            conversation pane.
+          </div>
+        </div>
+        <section class="composer">
+          <div class="composer-shell">
+            <div class="composer-input">
+              <textarea id="prompt" aria-label="Prompt" placeholder="Ask Gemini anything you want to test locally."></textarea>
+            </div>
+
+            <div class="composer-footer">
+              <div class="composer-meta">
+                <div class="composer-control model-control">
+                  <label class="composer-control-label" for="model">Model</label>
+                  <select id="model"></select>
+                </div>
+                <div class="composer-control timeout-control">
+                  <label class="composer-control-label" for="timeout-seconds">Timeout</label>
+                  <input id="timeout-seconds" type="number" min="15" max="600" step="5" value="150" />
+                </div>
+                <label class="composer-toggle" for="use-pro">
+                  <input type="checkbox" id="use-pro" />
+                  Nano Banana Pro
+                </label>
+                <label class="composer-toggle" for="temporary">
+                  <input type="checkbox" id="temporary" />
+                  Temporary mode
+                </label>
+              </div>
+              <div class="composer-actions">
+                <button id="reset" class="action-button action-button-subtle composer-reset" type="button">Reset Chat</button>
+                <button id="send" class="primary composer-send">Send Prompt</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="image-viewer" class="image-viewer" hidden>
+      <div class="image-viewer-backdrop" data-close-viewer="true"></div>
+      <div class="image-viewer-panel" role="dialog" aria-modal="true" aria-label="Image preview">
+        <div class="image-viewer-head">
+          <strong id="image-viewer-title">Image preview</strong>
+          <button id="image-viewer-close" class="image-viewer-close" type="button">Close</button>
+        </div>
+        <div class="image-viewer-frame">
+          <img id="image-viewer-img" alt="Gemini image preview" />
+        </div>
+        <div class="image-viewer-actions">
+          <div id="image-viewer-caption" class="image-viewer-caption">Preview</div>
+          <a id="image-viewer-download" class="gallery-button" href="#" download hidden>Download original</a>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const statusPill = document.getElementById("status-pill");
+      const appVersion = document.getElementById("app-version");
+      const liveLog = document.getElementById("live-log");
+      const modelSelect = document.getElementById("model");
+      const timeoutInput = document.getElementById("timeout-seconds");
+      const promptInput = document.getElementById("prompt");
+      const useProInput = document.getElementById("use-pro");
+      const temporaryInput = document.getElementById("temporary");
+      const sendButton = document.getElementById("send");
+      const resetButton = document.getElementById("reset");
+      const cookieBlobInput = document.getElementById("cookie-blob");
+      const persistCookiesInput = document.getElementById("persist-cookies");
+      const applyCookiesButton = document.getElementById("apply-cookies");
+      const reprobeAuthButton = document.getElementById("reprobe-auth");
+      const log = document.getElementById("log");
+      const activeModel = document.getElementById("active-model");
+      const imageViewer = document.getElementById("image-viewer");
+      const imageViewerImg = document.getElementById("image-viewer-img");
+      const imageViewerTitle = document.getElementById("image-viewer-title");
+      const imageViewerCaption = document.getElementById("image-viewer-caption");
+      const imageViewerDownload = document.getElementById("image-viewer-download");
+      const imageViewerClose = document.getElementById("image-viewer-close");
+
+      let lastModel = "unspecified";
+      let activeHistoryPoll = null;
+      const activeImagePolls = new Map();
+      let autoReprobeTimer = null;
+      let isChatBusy = false;
+      let isCookieBusy = false;
+      let isReprobeBusy = false;
+      let lastImageMode = null;
+      let activeRequestTimer = null;
+      let activeRuntimeLogPoll = null;
+      let runtimeLogCursor = 0;
+      const seenRuntimeLogIds = new Set();
+
+      function escapeHtml(text) {
+        return String(text ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+
+      function clearEmptyState() {
+        const empty = log.querySelector(".empty");
+        if (empty) {
+          empty.remove();
+        }
+      }
+
+      function syncPromptHeight() {
+        promptInput.style.height = "0px";
+        const nextHeight = Math.min(Math.max(promptInput.scrollHeight, 84), 240);
+        promptInput.style.height = `${nextHeight}px`;
+      }
+
+      function looksLikeImagePrompt(prompt) {
+        const lowered = String(prompt || "").toLowerCase();
+        return [
+          "generate image",
+          "generate an image",
+          "create image",
+          "create an image",
+          "draw ",
+          "render ",
+          "illustration",
+          "picture",
+          "photo",
+          "suncatcher",
+          "cat suncatcher",
+          "image of",
+          "tạo ảnh",
+          "tạo hình",
+          "tạo hình ảnh",
+          "vẽ ",
+          "ảnh ",
+          "hình ảnh",
+        ].some((token) => lowered.includes(token));
+      }
+
+      function modelLooksLikePro(model) {
+        const name = (model || "").trim().toLowerCase();
+        if (
+          name.startsWith("gemini-3-pro") ||
+          name.startsWith("gemini-3.0-pro") ||
+          name.startsWith("gemini-3.1-pro")
+        ) {
+          return true;
+        }
+
+        const option = Array.from(modelSelect.options || []).find((item) => item.value === model);
+        return ((option?.textContent || "").trim().toLowerCase() === "pro");
+      }
+
+      function shouldUseProImagePath(prompt, model, usePro = false) {
+        return Boolean(usePro || (looksLikeImagePrompt(prompt) && modelLooksLikePro(model)));
+      }
+
+      function resolveImageMode(prompt, usePro = false, model = "") {
+        if (shouldUseProImagePath(prompt, model, usePro)) {
+          return "Image generation Pro";
+        }
+
+        if (!looksLikeImagePrompt(prompt)) {
+          return null;
+        }
+        return "Image generation";
+      }
+
+      function renderModelLabel(model, imageMode = null) {
+        return imageMode ? `Model: ${model} · ${imageMode}` : `Model: ${model}`;
+      }
+
+      function resolveNanoBananaProModel(fallbackModel) {
+        const options = Array.from(modelSelect.options || []);
+        const candidates = options
+          .map((option) => ({
+            value: option.value,
+            label: (option.textContent || "").trim().toLowerCase(),
+            name: (option.value || "").trim().toLowerCase(),
+          }))
+          .filter(
+            (option) =>
+              option.label === "pro" ||
+              option.name.startsWith("gemini-3-pro") ||
+              option.name.startsWith("gemini-3.0-pro") ||
+              option.name.startsWith("gemini-3.1-pro"),
+          );
+
+        if (!candidates.length) {
+          return fallbackModel;
+        }
+
+        candidates.sort((a, b) => {
+          const score = (entry) => {
+            if (entry.label === "pro" && entry.name.includes("advanced")) return 0;
+            if (entry.name.includes("advanced")) return 1;
+            if (entry.name.includes("plus")) return 2;
+            if (entry.label === "pro") return 3;
+            return 4;
+          };
+          return score(a) - score(b) || a.name.localeCompare(b.name);
+        });
+
+        return candidates[0].value || fallbackModel;
+      }
+
+      function resolveEffectiveModel(model, usePro, prompt = "") {
+        return shouldUseProImagePath(prompt, model, usePro) ? resolveNanoBananaProModel(model) : model;
+      }
+
+      function setStatus(ready, message) {
+        statusPill.textContent = ready ? "Ready" : "Offline";
+        statusPill.classList.toggle("offline", !ready);
+        statusPill.title = message || "";
+      }
+
+      function shortFingerprint(value) {
+        if (!value) {
+          return "n/a";
+        }
+
+        if (value.length <= 12) {
+          return value;
+        }
+
+        return `${value.slice(0, 8)}...${value.slice(-4)}`;
+      }
+
+      function updateCredentialPreview(credentials = {}) {
+        if (!document.getElementById("credential-preview")) {
+          return;
+        }
+        const credentialPreview = document.getElementById("credential-preview");
+        if (!credentials.configured) {
+          credentialPreview.textContent = "No active Gemini cookies detected yet.";
+          return;
+        }
+
+        const maskedPsid = credentials.masked?.["__Secure-1PSID"] || "hidden";
+        const maskedPsidts = credentials.masked?.["__Secure-1PSIDTS"] || "hidden";
+        credentialPreview.textContent =
+          `Source: ${credentials.source || "unknown"} · ${credentials.cookieCount || 0} cookies · ` +
+          `PSID ${maskedPsid} · PSIDTS ${maskedPsidts} · Config ${shortFingerprint(credentials.fingerprint)}`;
+      }
+
+      function updateActiveSession(activeAuth = null) {
+        if (!document.getElementById("active-session-preview")) {
+          return;
+        }
+        const activeSessionPreview = document.getElementById("active-session-preview");
+        if (!activeAuth) {
+          activeSessionPreview.textContent = "Active Gemini session has not been initialized yet.";
+          return;
+        }
+
+        const source = activeAuth.authSource || "unknown source";
+        const authFingerprint = shortFingerprint(activeAuth.authCookieFingerprint);
+        const configuredFingerprint = shortFingerprint(activeAuth.configuredCookieFingerprint);
+        const matchText =
+          activeAuth.matchesConfigured === false
+            ? "Configured cookies are newer than the current session."
+            : "Session matches the latest configured cookies.";
+
+        activeSessionPreview.textContent =
+          `Active session via ${source} · Auth ${authFingerprint} · Session config ${configuredFingerprint} · ${matchText}`;
+      }
+
+      function updateAccountStatus(accountStatus = null, activeAuth = null) {
+        if (!document.getElementById("account-note")) {
+          return;
+        }
+        const accountNote = document.getElementById("account-note");
+        const effectiveStatus = activeAuth?.accountStatus || accountStatus;
+
+        if (activeAuth && activeAuth.matchesConfigured === false) {
+          accountNote.textContent =
+            "The active Gemini session is stale compared with the latest configured cookies. Re-auth to rebuild the session from the newest cookie source.";
+          return;
+        }
+
+        if (!effectiveStatus) {
+          accountNote.textContent = "Gemini account capability status is unavailable right now.";
+          return;
+        }
+
+        if (effectiveStatus.name === "AVAILABLE") {
+          accountNote.textContent = "Gemini account status is AVAILABLE. History sync and media features should work when Google allows them.";
+          return;
+        }
+
+        accountNote.textContent =
+          `Gemini account status is ${effectiveStatus.name} (${effectiveStatus.code}). ${effectiveStatus.description}`;
+      }
+
+      function handleStatusPayload(data, options = {}) {
+        if (appVersion) {
+          appVersion.textContent = `v${data.version || "dev"}`;
+        }
+        updateCredentialPreview(data.credentials || {});
+        updateActiveSession(data.activeAuth || null);
+        updateAccountStatus(data.accountStatus || null, data.activeAuth || null);
+        refreshModels(data);
+
+        if (data.recentLogs?.length) {
+          clearLiveLog();
+          data.recentLogs.forEach((entry) => pushRuntimeLogEntry(entry));
+        }
+
+        const message =
+          options.message ||
+          data.busyMessage ||
+          data.error ||
+          (data.reprobed ? "Session refreshed." : "Session ready.");
+        setStatus(Boolean(data.ready), message);
+      }
+
+      function pushLiveLog(message, level = "INFO") {
+        liveLog.innerHTML = "";
+        if (!window.__liveMessages) {
+          window.__liveMessages = [];
+        }
+        window.__liveMessages.unshift({ message, level });
+        window.__liveMessages = window.__liveMessages.slice(0, 12);
+
+        window.__liveMessages.forEach((entry) => {
+          const item = document.createElement("div");
+          item.className = `live-log-item ${entry.level.toLowerCase()}`;
+          item.innerHTML = `<strong>${escapeHtml(entry.level)}</strong> ${escapeHtml(entry.message)}`;
+          liveLog.appendChild(item);
+        });
+      }
+
+      function pushRuntimeLogEntry(entry) {
+        if (!entry?.message) {
+          return;
+        }
+
+        const id = Number(entry.id || 0);
+        if (id) {
+          if (seenRuntimeLogIds.has(id)) {
+            return;
+          }
+          seenRuntimeLogIds.add(id);
+          runtimeLogCursor = Math.max(runtimeLogCursor, id);
+        }
+
+        pushLiveLog(entry.message, entry.level || "INFO");
+      }
+
+      function clearLiveLog() {
+        window.__liveMessages = [];
+        liveLog.innerHTML = '<div class="live-log-item"><strong>INFO</strong> Waiting for the next request.</div>';
+      }
+
+      async function fetchRuntimeLogs() {
+        const data = await fetchJson(
+          `/api/logs?after_id=${encodeURIComponent(runtimeLogCursor)}`,
+          { cache: "no-store" },
+          5000,
+        );
+        (data.logs || []).forEach((entry) => pushRuntimeLogEntry(entry));
+      }
+
+      function startRuntimeLogPolling() {
+        stopRuntimeLogPolling();
+        fetchRuntimeLogs().catch(() => {});
+        activeRuntimeLogPoll = window.setInterval(() => {
+          fetchRuntimeLogs().catch(() => {});
+        }, 1500);
+      }
+
+      function stopRuntimeLogPolling() {
+        if (activeRuntimeLogPoll) {
+          window.clearInterval(activeRuntimeLogPoll);
+          activeRuntimeLogPoll = null;
+        }
+      }
+
+      function formatElapsed(seconds) {
+        const safeSeconds = Math.max(0, Number(seconds || 0));
+        const minutes = Math.floor(safeSeconds / 60);
+        const remainder = safeSeconds % 60;
+        return minutes ? `${minutes}m ${String(remainder).padStart(2, "0")}s` : `${remainder}s`;
+      }
+
+      function stopRequestTimer() {
+        if (activeRequestTimer) {
+          window.clearInterval(activeRequestTimer);
+          activeRequestTimer = null;
+        }
+      }
+
+      function startRequestTimer(refs, state, timeoutSeconds) {
+        stopRequestTimer();
+        const startedAt = Date.now();
+        let lastLoggedBucket = -1;
+
+        const tick = () => {
+          const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+          const label = formatElapsed(elapsed);
+          const waitMessage =
+            state.text || state.images?.length
+              ? `Gemini is still finalizing the response. Elapsed ${label}.`
+              : `Waiting for Gemini output. Elapsed ${label} / timeout ${formatElapsed(timeoutSeconds)}.`;
+
+          state.statusMessage = waitMessage;
+          if (!state.text) {
+            updateAssistantMessage(refs, state);
+          }
+          if (isChatBusy) {
+            sendButton.textContent = `Streaming ${label}`;
+          }
+
+          const bucket = elapsed < 5 ? 0 : Math.floor(elapsed / 30);
+          if (bucket > lastLoggedBucket && elapsed > 0) {
+            lastLoggedBucket = bucket;
+            pushLiveLog(
+              elapsed < 5
+                ? "Request is open. Waiting for Gemini to acknowledge the stream."
+                : `Gemini still processing after ${label}.`,
+              "INFO",
+            );
+          }
+        };
+
+        tick();
+        activeRequestTimer = window.setInterval(tick, 1000);
+      }
+
+      function createMessage(role, content, extra = {}) {
+        clearEmptyState();
+
+        const item = document.createElement("section");
+        item.className = `message ${role}${extra.streaming ? " streaming" : ""}`;
+
+        const bubble = document.createElement("div");
+        bubble.className = `bubble ${extra.error ? "error" : ""}`;
+        bubble.innerHTML = escapeHtml(content || "").replaceAll("\n", "<br />");
+        item.appendChild(bubble);
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent =
+          role === "user"
+            ? "You"
+            : role === "system"
+              ? "Local app"
+              : `Gemini · ${extra.model || lastModel}`;
+        item.appendChild(meta);
+
+        log.appendChild(item);
+        log.scrollTop = log.scrollHeight;
+
+        return {
+          item,
+          bubble,
+          meta,
+          details: null,
+          detailsBody: null,
+          gallery: null,
+          galleryCards: null,
+          historyChip: null,
+        };
+      }
+
+      function ensureThoughts(refs) {
+        if (refs.details) {
+          return refs.detailsBody;
+        }
+
+        const details = document.createElement("details");
+        const body = document.createElement("div");
+        details.innerHTML = "<summary>Model thoughts</summary>";
+        body.style.marginTop = "10px";
+        body.style.whiteSpace = "pre-wrap";
+        body.style.lineHeight = "1.6";
+        details.appendChild(body);
+        refs.item.insertBefore(details, refs.meta);
+        refs.details = details;
+        refs.detailsBody = body;
+        return body;
+      }
+
+      function ensureGallery(refs) {
+        if (refs.gallery) {
+          refs.galleryCards ||= new Map();
+          return refs.gallery;
+        }
+
+        const gallery = document.createElement("div");
+        gallery.className = "gallery";
+        refs.item.insertBefore(gallery, refs.meta);
+        refs.gallery = gallery;
+        refs.galleryCards = new Map();
+        return gallery;
+      }
+
+      function describeImageState(image) {
+        if (image.downloadReady) {
+          if (image.quality === "full") return "Full-size cache";
+          if (image.quality === "max") return "4096 cache";
+          if (image.quality === "fhd") return "FHD cache";
+          if (image.quality === "preview") return "Preview cache";
+          return "Local cache ready";
+        }
+
+        if (image.cacheStatus === "failed") {
+          return image.previewReady
+            ? "Preview ready · local save failed"
+            : "Preview unavailable · local save failed";
+        }
+
+        if (!image.previewReady) {
+          return "Preparing preview...";
+        }
+
+        if (image.serverManaged) {
+          return "Preview ready · saving local copy...";
+        }
+
+        return "Preview ready";
+      }
+
+      function resolvePreviewSrc(image) {
+        if (!image?.previewReady) {
+          return "";
+        }
+
+        return image.proxyUrl || image.browserUrl || image.sourceUrl || "";
+      }
+
+      function resolvePreviewHref(image) {
+        return image?.proxyUrl || image?.browserUrl || image?.sourceUrl || "#";
+      }
+
+      function getImageKey(image, index) {
+        return image?.token || image?.imageId || image?.browserUrl || image?.sourceUrl || `image-${index}`;
+      }
+
+      function getPreviewFallbackUrls(image) {
+        const urls = [];
+        const add = (url) => {
+          if (url && !urls.includes(url)) {
+            urls.push(url);
+          }
+        };
+
+        add(image?.proxyUrl || resolvePreviewSrc(image));
+        if (!image?.serverManaged || !image?.proxyUrl) {
+          add(image?.browserUrl);
+          add(image?.sourceUrl);
+        }
+        return urls;
+      }
+
+      function closeImageViewer() {
+        imageViewer.hidden = true;
+        imageViewerImg.removeAttribute("src");
+        imageViewerImg.__previewFallbackUrls = [];
+        imageViewerImg.dataset.fallbackIndex = "0";
+      }
+
+      function setViewerDownload(image) {
+        if (image?.downloadReady && (image.downloadUrl || image.proxyUrl)) {
+          imageViewerDownload.href = image.downloadUrl || image.proxyUrl;
+          imageViewerDownload.download = image.downloadName || "gemini-image.png";
+          imageViewerDownload.hidden = false;
+          return;
+        }
+
+        imageViewerDownload.hidden = true;
+        imageViewerDownload.href = "#";
+        imageViewerDownload.removeAttribute("download");
+      }
+
+      function openImageViewer(image, fallbackHref = "") {
+        const urls = getPreviewFallbackUrls(image);
+        if (fallbackHref && fallbackHref !== "#" && !urls.includes(fallbackHref)) {
+          urls.push(fallbackHref);
+        }
+
+        const src = urls[0] || "";
+        if (!src) {
+          pushLiveLog("No preview URL is available for this image yet.", "WARNING");
+          return;
+        }
+
+        imageViewerTitle.textContent = image?.title || image?.alt || "Image preview";
+        imageViewerCaption.textContent = describeImageState(image || {});
+        imageViewerImg.__previewFallbackUrls = urls;
+        imageViewerImg.dataset.fallbackIndex = "0";
+        imageViewerImg.dataset.previewErrorLogged = "";
+        imageViewerImg.dataset.serverManaged = image?.serverManaged ? "true" : "false";
+        imageViewerImg.alt = image?.alt || image?.title || "Gemini image preview";
+        imageViewerImg.src = src;
+        setViewerDownload(image);
+        imageViewer.hidden = false;
+        imageViewerClose.focus({ preventScroll: true });
+      }
+
+      imageViewerImg.addEventListener("error", () => {
+        const urls = imageViewerImg.__previewFallbackUrls || [];
+        const currentIndex = Number(imageViewerImg.dataset.fallbackIndex || "0");
+        const nextIndex = currentIndex + 1;
+        if (nextIndex < urls.length) {
+          imageViewerImg.dataset.fallbackIndex = String(nextIndex);
+          imageViewerImg.src = urls[nextIndex];
+          return;
+        }
+
+        if (imageViewerImg.dataset.previewErrorLogged !== "exhausted") {
+          imageViewerImg.dataset.previewErrorLogged = "exhausted";
+          if (imageViewerImg.dataset.serverManaged === "true") {
+            imageViewerCaption.textContent = "Preview proxy is not ready yet. The local cache is still trying.";
+            pushLiveLog("Preview proxy is not ready yet; local cache keeps trying.", "INFO");
+          } else {
+            imageViewerCaption.textContent = "Preview failed to render in this tab. Try again after the local cache is ready.";
+            pushLiveLog("In-page preview failed to render after all available sources.", "WARNING");
+          }
+        }
+      });
+
+      imageViewer.addEventListener("click", (event) => {
+        if (event.target?.dataset?.closeViewer === "true") {
+          closeImageViewer();
+        }
+      });
+
+      imageViewerClose.addEventListener("click", closeImageViewer);
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !imageViewer.hidden) {
+          closeImageViewer();
+        }
+      });
+
+      function createGalleryCard() {
+        const wrapper = document.createElement("div");
+        wrapper.className = "gallery-card";
+
+        const card = document.createElement("a");
+        card.className = "gallery-link";
+        card.addEventListener("click", (event) => {
+          event.preventDefault();
+          openImageViewer(card.__imageData, card.__previewHref);
+        });
+
+        const img = document.createElement("img");
+        img.alt = "Gemini image";
+        img.referrerPolicy = "no-referrer";
+        img.loading = "eager";
+        img.decoding = "async";
+        img.fetchPriority = "high";
+        img.addEventListener("load", () => {
+          img.dataset.previewLoaded = "true";
+        });
+        img.addEventListener("error", () => {
+          img.dataset.previewLoaded = "false";
+          const urls = img.__previewFallbackUrls || [];
+          const currentIndex = Number(img.dataset.fallbackIndex || "0");
+          const nextIndex = currentIndex + 1;
+          if (nextIndex < urls.length) {
+            if (img.dataset.previewErrorLogged !== String(nextIndex)) {
+              img.dataset.previewErrorLogged = String(nextIndex);
+              pushLiveLog(
+                `Preview image failed to render from source ${currentIndex + 1}; trying fallback ${nextIndex + 1}.`,
+                "WARNING",
+              );
+            }
+            img.dataset.fallbackIndex = String(nextIndex);
+            img.src = urls[nextIndex];
+            return;
+          }
+          if (img.dataset.previewErrorLogged !== "exhausted") {
+            img.dataset.previewErrorLogged = "exhausted";
+            if (img.dataset.serverManaged === "true") {
+              pushLiveLog("Preview proxy is not ready yet; local cache keeps trying.", "INFO");
+            } else {
+              pushLiveLog(
+                "Preview image failed in the browser. Try again after the local cache is ready.",
+                "WARNING",
+              );
+            }
+          }
+        });
+        card.appendChild(img);
+
+        const meta = document.createElement("div");
+        meta.className = "gallery-meta";
+
+        const caption = document.createElement("div");
+        caption.className = "gallery-caption";
+
+        const actions = document.createElement("div");
+        actions.className = "gallery-actions";
+
+        const openLink = document.createElement("a");
+        openLink.className = "gallery-button";
+        openLink.textContent = "Preview";
+        openLink.addEventListener("click", (event) => {
+          event.preventDefault();
+          openImageViewer(openLink.__imageData, openLink.__previewHref);
+        });
+        actions.appendChild(openLink);
+
+        const downloadLink = document.createElement("a");
+        downloadLink.className = "gallery-button";
+        downloadLink.addEventListener("click", (event) => {
+          if (downloadLink.dataset.disabled === "true") {
+            event.preventDefault();
+            return;
+          }
+
+          if (downloadLink.dataset.previewAction === "true") {
+            event.preventDefault();
+            openImageViewer(downloadLink.__imageData, downloadLink.__previewHref);
+          }
+        });
+        actions.appendChild(downloadLink);
+
+        meta.appendChild(caption);
+        meta.appendChild(actions);
+        wrapper.appendChild(card);
+        wrapper.appendChild(meta);
+
+        return { wrapper, card, img, caption, openLink, downloadLink };
+      }
+
+      function updateLink(link, href, disabled = false) {
+        link.href = href || "#";
+        link.classList.toggle("disabled", disabled);
+        if (disabled) {
+          link.setAttribute("aria-disabled", "true");
+          link.dataset.disabled = "true";
+        } else {
+          link.removeAttribute("aria-disabled");
+          delete link.dataset.disabled;
+        }
+      }
+
+      function updateDownloadLink(link, image, previewHref) {
+        link.removeAttribute("download");
+        link.removeAttribute("target");
+        link.removeAttribute("rel");
+        delete link.dataset.previewAction;
+        link.__imageData = image;
+        link.__previewHref = previewHref;
+
+        if (image.downloadReady) {
+          link.href = image.downloadUrl || image.proxyUrl || "#";
+          link.download = image.downloadName || "gemini-image.png";
+          link.textContent = "Download original";
+          updateLink(link, link.href, !link.href || link.href.endsWith("#"));
+          return;
+        }
+
+        if (image.proxyUrl || image.browserUrl || image.sourceUrl) {
+          link.href = image.proxyUrl || image.browserUrl || image.sourceUrl;
+          link.textContent = image.cacheStatus === "failed" ? "Preview fallback" : "Preview";
+          link.dataset.previewAction = "true";
+          updateLink(link, link.href, false);
+          return;
+        }
+
+        link.textContent = image.cacheStatus === "failed" ? "Preview only" : "Saving local copy...";
+        updateLink(link, previewHref, true);
+      }
+
+      function updateImageElement(card, image) {
+        const urls = getPreviewFallbackUrls(image);
+        const nextSrc = urls[0] || "";
+        card.img.__previewFallbackUrls = urls;
+        card.img.dataset.serverManaged = image.serverManaged ? "true" : "false";
+        card.img.alt = image.alt || image.title || "Gemini image";
+
+        const currentSrc = card.img.getAttribute("src") || "";
+        const shouldPreferLocal =
+          image.localPreviewReady &&
+          image.proxyUrl &&
+          card.img.dataset.previewLoaded !== "true";
+        const shouldUseUpdatedPreview =
+          currentSrc &&
+          card.img.dataset.previewLoaded !== "true" &&
+          !urls.includes(currentSrc);
+
+        if (!nextSrc) {
+          return;
+        }
+
+        if (!currentSrc || shouldPreferLocal || shouldUseUpdatedPreview) {
+          card.img.dataset.previewLoaded = "false";
+          card.img.dataset.fallbackIndex = "0";
+          card.img.dataset.previewErrorLogged = "";
+          card.img.src = nextSrc;
+        }
+      }
+
+      function updateGallery(refs, images) {
+        const gallery = ensureGallery(refs);
+        refs.galleryCards ||= new Map();
+
+        const liveKeys = new Set();
+        images.forEach((image, index) => {
+          const key = getImageKey(image, index);
+          liveKeys.add(key);
+          const previewHref = resolvePreviewHref(image);
+
+          let card = refs.galleryCards.get(key);
+          if (!card) {
+            card = createGalleryCard();
+            refs.galleryCards.set(key, card);
+            gallery.appendChild(card.wrapper);
+          }
+
+          card.card.href = previewHref;
+          card.card.__imageData = image;
+          card.card.__previewHref = previewHref;
+          card.card.setAttribute("aria-label", "Open image preview in this page");
+          card.openLink.href = previewHref;
+          card.openLink.__imageData = image;
+          card.openLink.__previewHref = previewHref;
+          card.caption.textContent = describeImageState(image);
+          updateImageElement(card, image);
+          updateDownloadLink(card.downloadLink, image, previewHref);
+        });
+
+        refs.galleryCards.forEach((card, key) => {
+          if (!liveKeys.has(key)) {
+            card.wrapper.remove();
+            refs.galleryCards.delete(key);
+          }
+        });
+      }
+
+      function setHistoryChip(refs, history) {
+        if (!history) {
+          return;
+        }
+
+        if (!refs.historyChip) {
+          const chip = document.createElement("div");
+          chip.className = "history-chip";
+          refs.item.insertBefore(chip, refs.meta);
+          refs.historyChip = chip;
+        }
+
+        const statusClass =
+          history.status === "saved" ? "" : history.status === "pending" ? "pending" : "warning";
+        refs.historyChip.className = `history-chip ${statusClass}`.trim();
+        const url = history.chatUrl;
+        refs.historyChip.innerHTML = url
+          ? `${escapeHtml(history.message)} <a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open</a>`
+          : escapeHtml(history.message);
+      }
+
+      function mergeImageState(state, nextImage) {
+        if (!nextImage?.token) {
+          return { previous: null, next: nextImage };
+        }
+
+        const index = state.images.findIndex((image) => image.token === nextImage.token);
+        if (index === -1) {
+          state.images.push(nextImage);
+          return { previous: null, next: nextImage };
+        }
+
+        const previous = state.images[index];
+        const next = { ...previous, ...nextImage };
+        state.images[index] = next;
+        return { previous, next };
+      }
+
+      function clearImagePoll(token) {
+        const timer = activeImagePolls.get(token);
+        if (timer) {
+          window.clearTimeout(timer);
+        }
+        activeImagePolls.delete(token);
+      }
+
+      async function pollGeneratedImage(token, refs, state, attempt = 1) {
+        if (!token) {
+          return;
+        }
+
+        try {
+          const data = await fetchJson(`/api/generated-image-status/${encodeURIComponent(token)}`, {}, 15000);
+          const { previous, next } = mergeImageState(state, data.image);
+          updateAssistantMessage(refs, state);
+
+          if (previous && !previous.downloadReady && next?.downloadReady) {
+            pushLiveLog("Local image cache is ready. Download original is now available.", "INFO");
+          } else if (next?.previewReady && !previous?.previewReady) {
+            pushLiveLog("Local preview is ready.", "INFO");
+          } else if (next?.cacheStatus === "failed" && previous?.cacheStatus !== "failed") {
+            pushLiveLog(
+              next.saveError || next.error || "Local image caching failed. Preview is still available, but download-ready did not complete.",
+              "WARNING",
+            );
+          }
+
+          if (!next || next.downloadReady || next.cacheStatus === "failed") {
+            clearImagePoll(token);
+            return;
+          }
+
+          const delay = Math.min(4000, 1200 + attempt * 300);
+          const timer = window.setTimeout(() => {
+            pollGeneratedImage(token, refs, state, attempt + 1);
+          }, delay);
+          activeImagePolls.set(token, timer);
+        } catch (error) {
+          if (attempt >= 8) {
+            pushLiveLog(
+              `Image cache status check stopped: ${String(error.message || error)}`,
+              "WARNING",
+            );
+            clearImagePoll(token);
+            return;
+          }
+
+          const timer = window.setTimeout(() => {
+            pollGeneratedImage(token, refs, state, attempt + 1);
+          }, 2000);
+          activeImagePolls.set(token, timer);
+        }
+      }
+
+      function ensureImagePolling(refs, state) {
+        (state.images || []).forEach((image) => {
+          if (!image?.serverManaged || !image?.token || image.downloadReady) {
+            return;
+          }
+          if (activeImagePolls.has(image.token)) {
+            return;
+          }
+          const timer = window.setTimeout(() => {
+            pollGeneratedImage(image.token, refs, state, 1);
+          }, 1200);
+          activeImagePolls.set(image.token, timer);
+        });
+      }
+
+      function updateAssistantMessage(refs, state) {
+        const fallback = state.statusMessage || "Waiting for Gemini to send visible output...";
+        refs.bubble.classList.toggle("error", Boolean(state.error));
+        refs.bubble.innerHTML = escapeHtml(state.text || fallback).replaceAll("\n", "<br />");
+        refs.meta.textContent = state.error
+          ? "Gemini · request failed"
+          : `Gemini · ${state.model || lastModel}${state.imageMode ? ` · ${state.imageMode}` : ""}${state.chatId ? ` · ${state.chatId}` : ""}`;
+
+        if (state.thoughts) {
+          ensureThoughts(refs).textContent = state.thoughts;
+        }
+
+        if (state.images?.length) {
+          updateGallery(refs, state.images);
+        }
+
+        if (state.history) {
+          setHistoryChip(refs, state.history);
+        }
+
+        log.scrollTop = log.scrollHeight;
+      }
+
+      function setChatBusy(isBusy) {
+        isChatBusy = isBusy;
+        sendButton.disabled = isBusy;
+        resetButton.disabled = isBusy;
+        useProInput.disabled = isBusy;
+        applyCookiesButton.disabled = isBusy;
+        reprobeAuthButton.disabled = isBusy || isCookieBusy || isReprobeBusy;
+        sendButton.textContent = isBusy ? "Streaming..." : "Send Prompt";
+      }
+
+      function setCookieBusy(isBusy) {
+        isCookieBusy = isBusy;
+        applyCookiesButton.disabled = isBusy;
+        sendButton.disabled = isBusy;
+        resetButton.disabled = isBusy;
+        useProInput.disabled = isBusy;
+        reprobeAuthButton.disabled = isBusy || isChatBusy || isReprobeBusy;
+        applyCookiesButton.textContent = isBusy ? "Applying..." : "Apply Cookies";
+      }
+
+      async function fetchJson(url, options = {}, timeoutMs = 20000) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+          const response = await fetch(url, { cache: "no-store", ...options, signal: controller.signal });
+          let data = {};
+          try {
+            data = await response.json();
+          } catch {
+            data = {};
+          }
+
+          if (!response.ok) {
+            throw new Error(data.detail || data.error || `Request failed with status ${response.status}`);
+          }
+
+          return data;
+        } catch (error) {
+          if (error.name === "AbortError") {
+            throw new Error("The request timed out before the server answered.");
+          }
+          throw error;
+        } finally {
+          window.clearTimeout(timer);
+        }
+      }
+
+      function refreshModels(data) {
+        const models = data.models?.length ? data.models : [{ name: "unspecified", label: "unspecified" }];
+        modelSelect.innerHTML = "";
+        models.forEach((model) => {
+          const option = document.createElement("option");
+          option.value = model.name;
+          option.textContent = model.label || model.name;
+          modelSelect.appendChild(option);
+        });
+
+        modelSelect.value = data.currentModel || models[0].name;
+        lastModel = modelSelect.value;
+        activeModel.textContent = renderModelLabel(lastModel, lastImageMode);
+      }
+
+      function setReprobeBusy(isBusy) {
+        isReprobeBusy = isBusy;
+        reprobeAuthButton.disabled = isBusy || isChatBusy || isCookieBusy;
+        reprobeAuthButton.textContent = isBusy ? "Re-authing..." : "Re-auth";
+      }
+
+      function scheduleAutoReprobe() {
+        if (autoReprobeTimer) {
+          window.clearInterval(autoReprobeTimer);
+        }
+
+        autoReprobeTimer = window.setInterval(() => {
+          if (isChatBusy || isCookieBusy || isReprobeBusy) {
+            return;
+          }
+
+          reprobeAuth({
+            silent: true,
+            statusMessage: "Session refreshed automatically.",
+          });
+        }, 5 * 60 * 1000);
+      }
+
+      async function loadStatus() {
+        const data = await fetchJson("/api/status");
+        handleStatusPayload(data);
+      }
+
+      async function applyCookies() {
+        const rawCookies = cookieBlobInput.value.trim();
+        if (!rawCookies) {
+          cookieBlobInput.focus();
+          return;
+        }
+
+        setCookieBusy(true);
+        try {
+          const data = await fetchJson(
+            "/api/cookies",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                raw_cookies: rawCookies,
+                persist: persistCookiesInput.checked,
+              }),
+            },
+            70000,
+          );
+
+          cookieBlobInput.value = "";
+          handleStatusPayload(data, {
+            message: "Cookies applied.",
+          });
+          await reprobeAuth({
+            silent: true,
+            statusMessage: "Fresh cookies were parsed and re-authenticated successfully.",
+          });
+          pushLiveLog("Fresh cookies were parsed and re-authenticated successfully.", "INFO");
+          createMessage("system", "Fresh cookies were parsed and re-authenticated successfully.");
+        } catch (error) {
+          setStatus(false, String(error.message || error));
+          pushLiveLog(String(error.message || error), "ERROR");
+          createMessage("system", String(error.message || error), { error: true });
+        } finally {
+          setCookieBusy(false);
+        }
+      }
+
+      async function reprobeAuth(options = {}) {
+        const silent = Boolean(options.silent);
+        const statusMessage =
+          options.statusMessage ||
+          "Gemini session re-authenticated.";
+
+        applyCookiesButton.disabled = true;
+        sendButton.disabled = true;
+        resetButton.disabled = true;
+        setReprobeBusy(true);
+
+        try {
+          const data = await fetchJson(
+            "/api/reprobe-auth",
+            {
+              method: "POST",
+            },
+            70000,
+          );
+
+          handleStatusPayload(data, {
+            message: data.sessionBusy
+              ? data.busyMessage || "Gemini session is busy right now."
+              : data.reprobed
+                ? "Session refreshed."
+                : "Session already current.",
+          });
+          if (!silent && data.sessionBusy) {
+            pushLiveLog(data.busyMessage || "Gemini session is busy right now.", "INFO");
+          } else if (!silent) {
+            pushLiveLog(statusMessage, "INFO");
+          }
+        } catch (error) {
+          setStatus(false, String(error.message || error));
+          if (!silent) {
+            pushLiveLog(String(error.message || error), "ERROR");
+            createMessage("system", String(error.message || error), { error: true });
+          }
+        } finally {
+          applyCookiesButton.disabled = isChatBusy || isCookieBusy;
+          sendButton.disabled = isChatBusy || isCookieBusy;
+          resetButton.disabled = isChatBusy || isCookieBusy;
+          setReprobeBusy(false);
+        }
+      }
+
+      async function sendPrompt() {
+        const prompt = promptInput.value.trim();
+        if (!prompt) {
+          promptInput.focus();
+          return;
+        }
+
+        const selectedModel = modelSelect.value;
+        const timeoutSeconds = Math.max(15, Math.min(600, Number(timeoutInput.value || 150)));
+        const usePro = useProInput.checked;
+        const imageUsePro = shouldUseProImagePath(prompt, selectedModel, usePro);
+        const model = resolveEffectiveModel(selectedModel, imageUsePro, prompt);
+        const reset = model !== lastModel;
+        const temporary = temporaryInput.checked;
+        const imageMode = resolveImageMode(prompt, imageUsePro, model);
+
+        createMessage("user", prompt);
+        promptInput.value = "";
+        syncPromptHeight();
+        setChatBusy(true);
+        clearLiveLog();
+        pushLiveLog(`Preparing request with model ${model}.`, "INFO");
+        setStatus(true, `Waiting for Gemini. Timeout set to ${timeoutSeconds}s.`);
+
+        const refs = createMessage("assistant", "Waiting for Gemini to send visible output...", {
+          model,
+          streaming: true,
+        });
+
+        const state = {
+          text: "",
+          thoughts: "",
+          images: [],
+          history: null,
+          model,
+          imageMode,
+          chatId: "",
+          temporary,
+          statusMessage: "Waiting for Gemini to send visible output...",
+          error: false,
+        };
+        activeModel.textContent = renderModelLabel(model, imageMode);
+        updateAssistantMessage(refs, state);
+        startRequestTimer(refs, state, timeoutSeconds);
+
+        if (activeHistoryPoll) {
+          window.clearTimeout(activeHistoryPoll);
+          activeHistoryPoll = null;
+        }
+
+        try {
+          startRuntimeLogPolling();
+          pushLiveLog("Sending request to the local backend stream.", "INFO");
+          const response = await fetch("/api/chat/stream", {
+            cache: "no-store",
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                prompt,
+                model,
+                reset,
+                temporary,
+                use_pro: imageUsePro,
+                timeout_seconds: timeoutSeconds,
+              }),
+            });
+
+          if (!response.ok) {
+            let detail = `Request failed with status ${response.status}`;
+            try {
+              const data = await response.json();
+              detail = data.detail || detail;
+            } catch {}
+            throw new Error(detail);
+          }
+          pushLiveLog("Local backend stream is open. Waiting for Gemini events.", "INFO");
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let firstNetworkChunkSeen = false;
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+              break;
+            }
+            if (!firstNetworkChunkSeen) {
+              firstNetworkChunkSeen = true;
+              pushLiveLog("Received the first stream bytes from the local backend.", "INFO");
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              const event = JSON.parse(line);
+
+              if (event.type === "log") {
+                pushRuntimeLogEntry(event);
+                continue;
+              }
+
+              if (event.type === "heartbeat") {
+                state.statusMessage = event.message;
+                pushLiveLog(event.message, "INFO");
+                if (!state.text) {
+                  updateAssistantMessage(refs, state);
+                }
+                continue;
+              }
+
+              if (event.type === "status") {
+                state.statusMessage = event.message;
+                pushLiveLog(event.message, event.level || "INFO");
+                if (!state.text) {
+                  updateAssistantMessage(refs, state);
+                }
+                continue;
+              }
+
+              if (event.type === "delta") {
+                if (event.thoughts_delta) {
+                  state.thoughts += event.thoughts_delta;
+                }
+                if (event.text_delta) {
+                  state.text += event.text_delta;
+                }
+                if (event.message) {
+                  pushLiveLog(event.message, "INFO");
+                }
+                updateAssistantMessage(refs, state);
+                continue;
+              }
+
+              if (event.type === "images_preview") {
+                state.images = event.images || state.images;
+                state.imageMode = event.imageMode || state.imageMode;
+                state.statusMessage = event.message || "Preview is ready while the local file keeps saving.";
+                if (event.message) {
+                  pushLiveLog(event.message, "INFO");
+                }
+                updateAssistantMessage(refs, state);
+                ensureImagePolling(refs, state);
+                continue;
+              }
+
+              if (event.type === "final") {
+                state.text = event.text || state.text;
+                state.thoughts = event.thoughts || state.thoughts;
+                state.images = event.images?.length ? event.images : state.images;
+                state.history = event.history || null;
+                state.model = event.model || state.model;
+                state.imageMode = event.imageMode || state.imageMode;
+                state.chatId = event.metadata?.[0] || "";
+                lastModel = state.model;
+                lastImageMode = state.imageMode || null;
+                activeModel.textContent = renderModelLabel(lastModel, lastImageMode);
+                updateAssistantMessage(refs, state);
+                if (event.warning) {
+                  pushLiveLog(event.warning, event.partial ? "WARNING" : "INFO");
+                }
+                if (state.history?.message) {
+                  const historyLevel =
+                    state.history.status === "saved"
+                      ? "INFO"
+                      : state.history.status === "pending"
+                        ? "INFO"
+                        : "WARNING";
+                  pushLiveLog(state.history.message, historyLevel);
+                }
+                if (state.images.length) {
+                  pushLiveLog(`Rendered ${state.images.length} image(s) locally.`, "INFO");
+                }
+                ensureImagePolling(refs, state);
+                if (state.chatId && !state.temporary && state.history?.status === "pending") {
+                  pollHistory(state.chatId, refs, state);
+                }
+                setStatus(true, "Gemini client is ready.");
+                continue;
+              }
+
+              if (event.type === "error") {
+                state.error = true;
+                state.statusMessage = event.message;
+                pushLiveLog(event.message, "ERROR");
+                updateAssistantMessage(refs, state);
+                setStatus(false, event.message);
+                continue;
+              }
+            }
+          }
+        } catch (error) {
+          state.error = true;
+          state.statusMessage = String(error.message || error);
+          updateAssistantMessage(refs, state);
+          pushLiveLog(String(error.message || error), "ERROR");
+          setStatus(false, String(error.message || error));
+        } finally {
+          stopRuntimeLogPolling();
+          stopRequestTimer();
+          refs.item.classList.remove("streaming");
+          setChatBusy(false);
+        }
+      }
+
+      async function pollHistory(cid, refs, state, attempt = 1) {
+        if (!cid || state.temporary) {
+          return;
+        }
+
+        try {
+          const history = await fetchJson(`/api/history/${encodeURIComponent(cid)}`, {}, 15000);
+          state.history = history;
+          updateAssistantMessage(refs, state);
+
+          if (history.status === "saved") {
+            pushLiveLog(history.message, "INFO");
+            activeHistoryPoll = null;
+            return;
+          }
+
+          if (history.status === "blocked" || history.status === "missing") {
+            pushLiveLog(history.message, "WARNING");
+            activeHistoryPoll = null;
+            return;
+          }
+
+          if (attempt < 10) {
+            activeHistoryPoll = window.setTimeout(() => {
+              pollHistory(cid, refs, state, attempt + 1);
+            }, 4000);
+            return;
+          }
+
+          pushLiveLog("Gemini still has not confirmed this chat in history. The Open link uses the returned chat ID directly.", "WARNING");
+          activeHistoryPoll = null;
+        } catch (error) {
+          pushLiveLog(`History re-check failed: ${String(error.message || error)}`, "WARNING");
+          activeHistoryPoll = null;
+        }
+      }
+
+      async function resetChat() {
+        setChatBusy(true);
+        try {
+          const data = await fetchJson("/api/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: modelSelect.value }),
+          });
+
+          lastModel = data.currentModel || modelSelect.value;
+          lastImageMode = null;
+          activeModel.textContent = renderModelLabel(lastModel, lastImageMode);
+          log.innerHTML = '<div class="empty">Chat reset. Send a fresh prompt when you are ready.</div>';
+          clearLiveLog();
+          pushLiveLog(`Chat reset for model ${lastModel}.`, "INFO");
+          setStatus(true, "Chat session reset.");
+        } catch (error) {
+          pushLiveLog(String(error.message || error), "ERROR");
+          createMessage("assistant", String(error.message || error), { error: true });
+          setStatus(false, String(error.message || error));
+        } finally {
+          setChatBusy(false);
+        }
+      }
+
+      applyCookiesButton.addEventListener("click", applyCookies);
+      reprobeAuthButton.addEventListener("click", reprobeAuth);
+      sendButton.addEventListener("click", sendPrompt);
+      resetButton.addEventListener("click", resetChat);
+      promptInput.addEventListener("input", syncPromptHeight);
+      promptInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          sendPrompt();
+        }
+      });
+
+      syncPromptHeight();
+      scheduleAutoReprobe();
+      loadStatus().catch((error) => {
+        setStatus(false, String(error.message || error));
+        pushLiveLog(String(error.message || error), "ERROR");
+      });
+    </script>
+  </body>
+</html>

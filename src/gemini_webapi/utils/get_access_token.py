@@ -1,3 +1,5 @@
+import hashlib
+import random
 import re
 import time
 
@@ -6,13 +8,118 @@ import orjson as json
 
 from .load_browser_cookies import HAS_BC3, load_browser_cookies
 from .logger import logger
+from .parsing import extract_json_from_response, get_nested_value
 from .rotate_1psidts import (
     _extract_cookie_value,
     _get_cookies_cache_path,
     _get_cookie_cache_dir,
 )
-from ..constants import Endpoint, Headers
+from ..constants import AccountStatus, Endpoint, GRPC, Headers
 from ..exceptions import AuthError
+
+
+def _clone_cookies(cookies: dict | Cookies) -> Cookies:
+    jar = Cookies()
+    if isinstance(cookies, Cookies):
+        for cookie in cookies.jar:
+            if not cookie.is_expired():
+                jar.set(
+                    str(cookie.name),
+                    str(cookie.value),
+                    domain=cookie.domain or ".google.com",
+                    path=cookie.path or "/",
+                )
+    else:
+        for name, value in cookies.items():
+            if value:
+                jar.set(str(name), str(value), domain=".google.com", path="/")
+    return jar
+
+
+def build_cookie_fingerprint(cookies: dict | Cookies) -> str | None:
+    entries: list[tuple[str, str, str, str]] = []
+
+    if isinstance(cookies, Cookies):
+        for cookie in cookies.jar:
+            if cookie.is_expired():
+                continue
+            entries.append(
+                (
+                    str(cookie.name),
+                    str(cookie.value),
+                    str(cookie.domain or ""),
+                    str(cookie.path or "/"),
+                )
+            )
+    else:
+        for name, value in cookies.items():
+            if value:
+                entries.append((str(name), str(value), ".google.com", "/"))
+
+    if not entries:
+        return None
+
+    entries.sort()
+    payload = json.dumps(entries).decode("utf-8")
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+async def _probe_account_status(
+    client: AsyncSession,
+    access_token: str | None,
+    build_label: str | None,
+    session_id: str | None,
+    language: str | None,
+    verbose: bool = False,
+) -> AccountStatus | None:
+    if not access_token:
+        return None
+
+    params = {
+        "rpcids": str(GRPC.GET_USER_STATUS),
+        "hl": language or "en",
+        "_reqid": random.randint(10000, 99999),
+        "rt": "c",
+        "source-path": "/app",
+    }
+    if build_label:
+        params["bl"] = build_label
+    if session_id:
+        params["f.sid"] = session_id
+
+    response = await client.post(
+        Endpoint.BATCH_EXEC,
+        params=params,
+        headers={
+            **Headers.GEMINI.value,
+            **Headers.BATCH_EXEC.value,
+            **Headers.SAME_DOMAIN.value,
+        },
+        data={
+            "at": access_token,
+            "f.req": json.dumps([[[str(GRPC.GET_USER_STATUS), "[]", None, "generic"]]]).decode("utf-8"),
+        },
+    )
+    if verbose:
+        logger.debug(f"HTTP Request: POST {Endpoint.BATCH_EXEC} [{response.status_code}]")
+
+    if response.status_code != 200:
+        return None
+
+    response_json = extract_json_from_response(response.text)
+    for part in response_json:
+        part_body_str = get_nested_value(part, [2])
+        if not part_body_str:
+            continue
+
+        try:
+            part_body = json.loads(part_body_str)
+        except json.JSONDecodeError:
+            continue
+
+        return AccountStatus.from_status_code(get_nested_value(part_body, [14]))
+
+    return None
 
 
 async def _send_request(
@@ -90,120 +197,80 @@ async def get_access_token(
     if response.status_code == 200:
         extra_cookies = preflight_cookies
 
-    # Phase 1: Prepare Cache
-    cookie_jars_to_test = []
-    tried_sessions: dict[str, set[str]] = {}
+    cookie_jars_to_test: list[tuple[Cookies, str, str, str | None]] = []
+    seen_fingerprints: set[str] = set()
 
     if isinstance(base_cookies, Cookies):
         base_psid = _extract_cookie_value(base_cookies, "__Secure-1PSID")
-        base_psidts = _extract_cookie_value(base_cookies, "__Secure-1PSIDTS")
     else:
         base_psid = base_cookies.get("__Secure-1PSID")
-        base_psidts = base_cookies.get("__Secure-1PSIDTS")
+    def add_candidate(jar: Cookies, source: str, group_name: str) -> None:
+        jar.update(extra_cookies)
+        fingerprint = build_cookie_fingerprint(jar)
+        if not fingerprint:
+            return
+        if fingerprint in seen_fingerprints:
+            return
+        seen_fingerprints.add(fingerprint)
+        cookie_jars_to_test.append((jar, source, group_name, fingerprint))
 
+    # Phase 1: Explicit Cookies
     if base_psid:
-        jar = Cookies()
-        jar.set("__Secure-1PSID", base_psid, domain=".google.com")
-        cache_file = _get_cookies_cache_path(jar)
+        add_candidate(_clone_cookies(base_cookies), "explicit", "Explicit Cookies")
+    elif verbose:
+        logger.debug("Skipping explicit cookies. __Secure-1PSID is not provided.")
+
+    # Phase 2: Cache
+    if base_psid:
+        cache_seed = Cookies()
+        cache_seed.set("__Secure-1PSID", base_psid, domain=".google.com")
+        cache_file = _get_cookies_cache_path(cache_seed)
 
         if cache_file and cache_file.is_file():
             content = cache_file.read_text().strip()
             if content:
-                jar = Cookies()
-                if isinstance(base_cookies, Cookies):
-                    for cookie in base_cookies.jar:
-                        if not cookie.is_expired():
-                            jar.set(
-                                str(cookie.name),
-                                str(cookie.value),
-                                domain=cookie.domain,
-                                path=cookie.path,
-                            )
-                else:
-                    for name, value in base_cookies.items():
-                        if value:
-                            jar.set(name, value, domain=".google.com", path="/")
-
                 try:
-                    cookies_data = json.loads(content)
-                    for cookie in cookies_data:
+                    cache_data = json.loads(content)
+                    jar = Cookies()
+                    for cookie in cache_data:
                         expires = cookie.get("expires")
                         if expires and expires < time.time():
                             continue
-
                         jar.set(
                             cookie["name"],
                             cookie["value"],
                             domain=cookie.get("domain", ".google.com"),
                             path=cookie.get("path", "/"),
                         )
-
-                    jar.update(extra_cookies)
-                    cookie_jars_to_test.append((jar, "Cache"))
-                    psidts = _extract_cookie_value(jar, "__Secure-1PSIDTS") or ""
-                    tried_sessions.setdefault(base_psid, set()).add(psidts)
+                    add_candidate(jar, "cache", "Cache")
                 except Exception as e:
                     logger.warning(f"Failed to parse cached cookies as JSON: {e}")
             elif verbose:
                 logger.debug("Skipping loading cached cookies. Cache file is empty.")
         elif verbose:
             logger.debug("Skipping loading cached cookies. Cache file not found.")
-
-    if not base_psid:
+    else:
         cache_files = list(_get_cookie_cache_dir().glob(".cached_cookies_*.json"))
         if cache_files:
             cache_file = max(cache_files, key=lambda p: p.stat().st_mtime)
-            psid = cache_file.stem[16:]
             content = cache_file.read_text().strip()
             if content:
-                jar = Cookies()
                 try:
-                    cookies_data = json.loads(content)
-                    for cookie in cookies_data:
+                    cache_data = json.loads(content)
+                    jar = Cookies()
+                    for cookie in cache_data:
                         expires = cookie.get("expires")
                         if expires and expires < time.time():
                             continue
-
                         jar.set(
                             cookie["name"],
                             cookie["value"],
                             domain=cookie.get("domain", ".google.com"),
                             path=cookie.get("path", "/"),
                         )
-
-                    jar.update(extra_cookies)
-                    cookie_jars_to_test.append((jar, "Cache (Latest)"))
-                    psidts = _extract_cookie_value(jar, "__Secure-1PSIDTS") or ""
-                    tried_sessions.setdefault(psid, set()).add(psidts)
+                    add_candidate(jar, "cache:latest", "Cache (Latest)")
                 except Exception as e:
                     logger.warning(f"Failed to parse cached cookies as JSON: {e}")
-
-    # Phase 2: Base Cookies
-    if base_psid:
-        psidts = base_psidts or ""
-        if psidts not in tried_sessions.get(base_psid, set()):
-            jar = Cookies()
-            if isinstance(base_cookies, Cookies):
-                for cookie in base_cookies.jar:
-                    if not cookie.is_expired():
-                        jar.set(
-                            cookie.name,
-                            cookie.value,
-                            domain=cookie.domain,
-                            path=cookie.path,
-                        )
-            else:
-                for name, value in base_cookies.items():
-                    if value:
-                        jar.set(name, value, domain=".google.com", path="/")
-
-            jar.update(extra_cookies)
-            cookie_jars_to_test.append((jar, "Base Cookies"))
-            tried_sessions.setdefault(base_psid, set()).add(psidts)
-        elif verbose:
-            logger.debug("Skipping base cookies as they match cached cookies.")
-    elif verbose and not cookie_jars_to_test:
-        logger.debug("Skipping loading base cookies. __Secure-1PSID is not provided.")
 
     # Phase 3: Browser Cookies
     try:
@@ -225,34 +292,29 @@ async def get_access_token(
                             )
                         continue
 
-                    if secure_1psidts not in tried_sessions.get(secure_1psid, set()):
-                        jar = Cookies()
-                        for cookie in cookie_list:
-                            name = cookie["name"]
-                            # Load only __Secure-1PSID and __Secure-1PSIDTS to prevent HTTP 401 errors when rotating cookies.
-                            if name not in ["__Secure-1PSID", "__Secure-1PSIDTS"]:
-                                continue
+                    jar = Cookies()
+                    for cookie in cookie_list:
+                        name = cookie["name"]
+                        # Load only __Secure-1PSID and __Secure-1PSIDTS to prevent HTTP 401 errors when rotating cookies.
+                        if name not in ["__Secure-1PSID", "__Secure-1PSIDTS"]:
+                            continue
 
-                            jar.set(
-                                cookie["name"],
-                                cookie["value"],
-                                domain=cookie["domain"],
-                                path=cookie["path"],
-                            )
-
-                        jar.update(extra_cookies)
-                        cookie_jars_to_test.append((jar, f"Browser ({browser})"))
-                        tried_sessions.setdefault(secure_1psid, set()).add(
-                            secure_1psidts
+                        jar.set(
+                            cookie["name"],
+                            cookie["value"],
+                            domain=cookie["domain"],
+                            path=cookie["path"],
                         )
-                        if verbose:
-                            logger.debug(
-                                f"Prepared essential browser cookies from {browser}."
-                            )
+
+                    add_candidate(jar, f"browser:{browser}", f"Browser ({browser})")
+                    if verbose:
+                        logger.debug(
+                            f"Prepared essential browser cookies from {browser}."
+                        )
 
         if (
             HAS_BC3
-            and not any(group.startswith("Browser") for _, group in cookie_jars_to_test)
+            and not any(group.startswith("Browser") for _, _, group, _ in cookie_jars_to_test)
             and verbose
         ):
             logger.debug(
@@ -265,7 +327,8 @@ async def get_access_token(
             )
 
     current_attempt = 0
-    for jar, group_name in cookie_jars_to_test:
+    first_success: dict[str, object] | None = None
+    for jar, auth_source, group_name, fingerprint in cookie_jars_to_test:
         current_attempt += 1
         try:
             response = await _send_request(client, jar, verbose=verbose)
@@ -275,23 +338,71 @@ async def get_access_token(
             language = re.search(r'"TuX5cc":\s*"(.*?)"', response.text)
             push_id = re.search(r'"qKIAYe":\s*"(.*?)"', response.text)
             if access_token or build_label or session_id or language or push_id:
+                account_status = await _probe_account_status(
+                    client=client,
+                    access_token=access_token.group(1) if access_token else None,
+                    build_label=build_label.group(1) if build_label else None,
+                    session_id=session_id.group(1) if session_id else None,
+                    language=language.group(1) if language else None,
+                    verbose=verbose,
+                )
                 if verbose:
                     logger.debug(
                         f"Init attempt ({current_attempt}) from {group_name} succeeded."
                     )
-                return (
-                    access_token.group(1) if access_token else None,
-                    build_label.group(1) if build_label else None,
-                    session_id.group(1) if session_id else None,
-                    language.group(1) if language else None,
-                    push_id.group(1) if push_id else None,
-                    client,
-                )
+                    if account_status is not None:
+                        logger.debug(
+                            f"Init attempt ({current_attempt}) from {group_name} reached account status {account_status.name}."
+                        )
+
+                candidate_result = {
+                    "access_token": access_token.group(1) if access_token else None,
+                    "build_label": build_label.group(1) if build_label else None,
+                    "session_id": session_id.group(1) if session_id else None,
+                    "language": language.group(1) if language else None,
+                    "push_id": push_id.group(1) if push_id else None,
+                    "auth_source": auth_source,
+                    "auth_cookie_fingerprint": fingerprint,
+                    "account_status": account_status,
+                    "live_cookies": Cookies(client.cookies),
+                }
+                if first_success is None:
+                    first_success = candidate_result
+
+                if account_status == AccountStatus.AVAILABLE:
+                    client.cookies.clear()
+                    client.cookies.update(candidate_result["live_cookies"])
+                    client._gemini_auth_source = auth_source
+                    client._gemini_auth_cookie_fingerprint = fingerprint
+                    client._gemini_auth_account_status = account_status
+                    return (
+                        candidate_result["access_token"],
+                        candidate_result["build_label"],
+                        candidate_result["session_id"],
+                        candidate_result["language"],
+                        candidate_result["push_id"],
+                        client,
+                    )
         except Exception:
             if verbose:
                 logger.debug(
                     f"Init attempt ({current_attempt}) from {group_name} failed."
                 )
+
+    if first_success is not None:
+        client.cookies.clear()
+        client.cookies.update(first_success["live_cookies"])
+        client._gemini_auth_source = first_success["auth_source"]
+        client._gemini_auth_cookie_fingerprint = first_success["auth_cookie_fingerprint"]
+        client._gemini_auth_account_status = first_success["account_status"]
+        return (
+            first_success["access_token"],
+            first_success["build_label"],
+            first_success["session_id"],
+            first_success["language"],
+            first_success["push_id"],
+            client,
+        )
 
     await client.close()
     raise AuthError(

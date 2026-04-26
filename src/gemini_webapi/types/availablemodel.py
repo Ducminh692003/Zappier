@@ -110,33 +110,48 @@ class AvailableModel(BaseModel):
         return 1, 12  # Free accounts
 
     @staticmethod
-    def build_model_id_name_mapping() -> dict[str, str]:
+    def build_model_id_name_mapping(
+        capacity: int = 1,
+        capacity_field: int = 12,
+    ) -> dict[str, str]:
         """
-        Build a mapping from `model_id` to `model_name` for all registered models.
+        Build a mapping from `model_id` to `model_name` for all registered models,
+        preferring the model family that matches the account tier.
 
-        This uses the :class:`Model` enum to resolve hex identifiers to their
-        canonical names (e.g., "gemini-3-pro").
+        PLUS and ADVANCED tiers share model ids and differ only by the capacity
+        value in the request header. If we always strip names back to BASIC, the
+        UI can appear to select a Pro-tier model while the request name resolves
+        to a lower-tier header later.
         """
+
+        if capacity == 4 and capacity_field == 12:
+            tier_order = ("PLUS", "ADVANCED", "BASIC")
+        elif capacity == 2 and capacity_field in (12, 13):
+            tier_order = ("ADVANCED", "PLUS", "BASIC")
+        elif capacity == 1 and capacity_field == 13:
+            tier_order = ("PLUS", "ADVANCED", "BASIC")
+        else:
+            tier_order = ("BASIC", "PLUS", "ADVANCED")
 
         result: dict[str, str] = {}
-        for member in Model:
-            if member is Model.UNSPECIFIED:
-                continue
+        for tier_prefix in tier_order:
+            for member in Model:
+                if member is Model.UNSPECIFIED:
+                    continue
+                if not member.name.startswith(f"{tier_prefix}_"):
+                    continue
 
-            header_value = member.model_header.get(MODEL_HEADER_KEY, "")
-            if not header_value:
-                continue
+                header_value = member.model_header.get(MODEL_HEADER_KEY, "")
+                if not header_value:
+                    continue
 
-            try:
-                parsed = json.loads(header_value)
-                model_id = get_nested_value(parsed, [4])
-            except json.JSONDecodeError:
-                continue
+                try:
+                    parsed = json.loads(header_value)
+                    model_id = get_nested_value(parsed, [4])
+                except json.JSONDecodeError:
+                    continue
 
-            if model_id and model_id not in result:
-                # Use basic model name without tier suffix regardless of the actual tier
-                base_key = "BASIC_" + member.name.split("_", 1)[-1]
-                base_member = getattr(Model, base_key, member)
-                result[model_id] = base_member.model_name
+                if model_id and model_id not in result:
+                    result[model_id] = member.model_name
 
         return result

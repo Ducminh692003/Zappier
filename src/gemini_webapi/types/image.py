@@ -38,6 +38,7 @@ class Image(BaseModel):
     alt: str = ""
     proxy: str | None = None
     client: AsyncSession | None = None
+    saved_quality: str | None = None
     _default_filename_suffix: str = "image"
 
     def _get_url_for_hash(self) -> str:
@@ -96,14 +97,18 @@ class Image(BaseModel):
         req_client = client or self.client
         if not req_client:
             client_ref = getattr(self, "client_ref", None)
-            cookies = getattr(client_ref, "cookies", None) if client_ref else None
-            req_client = AsyncSession(
-                impersonate="chrome",
-                allow_redirects=True,
-                cookies=cookies,
-                proxy=self.proxy,
-            )
-            close_client = True
+            shared_client = getattr(client_ref, "client", None) if client_ref else None
+            if shared_client:
+                req_client = shared_client
+            else:
+                cookies = getattr(client_ref, "cookies", None) if client_ref else None
+                req_client = AsyncSession(
+                    impersonate="chrome",
+                    allow_redirects=True,
+                    cookies=cookies,
+                    proxy=self.proxy,
+                )
+                close_client = True
 
         try:
             path_obj = Path(path)
@@ -121,34 +126,49 @@ class Image(BaseModel):
         """
         Base implementation: simple download.
         """
+        current_url = self.url
+        response = None
+        request_headers = dict(Headers.REFERER.value)
 
-        response = await req_client.get(self.url, headers=Headers.REFERER.value)
-        if verbose:
-            logger.debug(f"HTTP Request: GET {self.url} [{response.status_code}]")
-
-        if response.status_code == 200:
-            path_obj_file = Path(filename)
-            if not path_obj_file.suffix:
-                content_type = (
-                    response.headers.get("content-type", "")
-                    .split(";")[0]
-                    .strip()
-                    .lower()
-                )
-                ext = mimetypes.guess_extension(content_type) or ".png"
-                filename = f"{filename}{ext}"
-
-            dest = path_obj / filename
-            dest.write_bytes(response.content)
-
+        for _ in range(8):
+            response = await req_client.get(current_url, headers=request_headers)
             if verbose:
-                logger.info(f"Image saved as {dest.resolve()}")
+                logger.debug(f"HTTP Request: GET {current_url} [{response.status_code}]")
 
-            return str(dest.resolve())
-        else:
-            raise HTTPError(
-                f"Error downloading image: {response.status_code} {response.reason}"
+            if response.status_code != 200:
+                break
+
+            content_type = (
+                response.headers.get("content-type", "").split(";")[0].strip().lower()
             )
+            if content_type.startswith("image/"):
+                path_obj_file = Path(filename)
+                if not path_obj_file.suffix:
+                    ext = mimetypes.guess_extension(content_type) or ".png"
+                    filename = f"{filename}{ext}"
+
+                dest = path_obj / filename
+                dest.write_bytes(response.content)
+
+                if verbose:
+                    logger.info(f"Image saved as {dest.resolve()}")
+
+                self.saved_quality = self.saved_quality or "source"
+                return str(dest.resolve())
+
+            if content_type.startswith("text/plain"):
+                next_url = response.text.strip()
+                if next_url.startswith("http"):
+                    current_url = next_url
+                    self.url = current_url
+                    continue
+
+            break
+
+        raise HTTPError(
+            f"Error downloading image: {response.status_code if response else 'N/A'} "
+            f"{getattr(response, 'reason', '') if response else ''}".strip()
+        )
 
 
 class WebImage(Image):
@@ -186,6 +206,57 @@ class GeneratedImage(Image):
     rid: str = ""
     rcid: str = ""
     image_id: str = ""
+    preview_url: str = ""
+    preferred_preview_size: int = 2048
+
+    @staticmethod
+    def _build_base_candidate(url: str) -> str | None:
+        if not url or "googleusercontent.com" not in url:
+            return None
+        return url.split("=", 1)[0]
+
+    @classmethod
+    def _build_handoff_candidate(cls, url: str) -> str | None:
+        base = cls._build_base_candidate(url)
+        if not base:
+            return None
+        return f"{base}=d-I?alr=yes"
+
+    @classmethod
+    def _build_full_size_candidate(cls, url: str) -> str | None:
+        return cls._build_handoff_candidate(url)
+
+    @classmethod
+    def _build_scaled_candidate(cls, url: str, size: int) -> str | None:
+        base = cls._build_base_candidate(url)
+        if not base:
+            return None
+        return f"{base}=s{max(1, int(size))}"
+
+    @classmethod
+    def _build_fhd_candidate(cls, url: str) -> str | None:
+        return cls._build_scaled_candidate(url, 2048)
+
+    def _build_preferred_preview_candidate(self, url: str) -> str | None:
+        size = 4096 if int(self.preferred_preview_size or 0) >= 4096 else 2048
+        return self._build_scaled_candidate(url, size)
+
+    def _build_preview_candidates(
+        self,
+        url: str,
+        *,
+        prefer_fhd: bool,
+    ) -> list[str]:
+        candidates: list[str] = []
+
+        def add(candidate: str | None) -> None:
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        if prefer_fhd:
+            add(self._build_preferred_preview_candidate(url))
+        add(url)
+        return candidates
 
     # @override
     async def _perform_save(
@@ -218,6 +289,10 @@ class GeneratedImage(Image):
             Absolute path of the saved image if successfully saved.
         """
 
+        preview_url = self.preview_url or self.url
+        self.preview_url = preview_url
+        self.saved_quality = None
+
         if full_size:
             if all([self.client_ref, self.cid, self.rid, self.rcid, self.image_id]):
                 try:
@@ -228,37 +303,80 @@ class GeneratedImage(Image):
                         image_id=self.image_id,
                     )
                     if original_url:
-                        req_url = f"{original_url}=d-I?alr=yes"
-
-                        response = await req_client.get(
-                            req_url, headers=Headers.REFERER.value
-                        )
-                        response.raise_for_status()
-                        url_text = response.text
-
-                        response = await req_client.get(
-                            url_text, headers=Headers.REFERER.value
-                        )
-                        response.raise_for_status()
-                        self.url = response.text
-
-                        return await super()._perform_save(
-                            req_client, path_obj, filename, verbose
-                        )
+                        self.url = f"{original_url}=d-I?alr=yes"
+                        try:
+                            saved_path = await super()._perform_save(
+                                req_client, path_obj, filename, verbose
+                            )
+                            self.saved_quality = "full"
+                            return saved_path
+                        except HTTPError as e:
+                            self.url = preview_url
+                            logger.debug(
+                                f"Failed to download Gemini full-size image: {e}. Falling back to preview URL."
+                            )
 
                 except Exception as e:
+                    self.url = preview_url
                     logger.debug(
                         f"Failed to fetch full size image URL via RPC: {e}, falling back to default URL suffix."
                     )
 
-            if "=s1024-rj" in self.url:
-                self.url = self.url.replace("=s1024-rj", "=s2048-rj")
-            elif "=s2048-rj" not in self.url:
-                self.url += "=s2048-rj"
-        else:
-            if "=s2048-rj" in self.url:
-                self.url = self.url.replace("=s2048-rj", "=s1024-rj")
-            elif "=s1024-rj" not in self.url:
-                self.url += "=s1024-rj"
+            fhd_url = self._build_preferred_preview_candidate(preview_url)
+            if fhd_url and fhd_url != preview_url:
+                try:
+                    self.url = fhd_url
+                    saved_path = await super()._perform_save(
+                        req_client, path_obj, filename, verbose
+                    )
+                    self.saved_quality = (
+                        "max" if int(self.preferred_preview_size or 0) >= 4096 else "fhd"
+                    )
+                    return saved_path
+                except HTTPError as e:
+                    self.url = preview_url
+                    logger.debug(
+                        f"Failed to download Gemini FHD image via preview fallback: {e}. Falling back to plain preview."
+                    )
 
-        return await super()._perform_save(req_client, path_obj, filename, verbose)
+            last_error: HTTPError | None = None
+            self.url = preview_url
+            try:
+                saved_path = await super()._perform_save(
+                    req_client, path_obj, filename, verbose
+                )
+                self.saved_quality = "preview"
+                return saved_path
+            except HTTPError as e:
+                last_error = e
+                logger.debug(
+                    f"Failed to download a Gemini preview fallback: {e}."
+                )
+
+            if last_error is not None:
+                raise last_error
+            raise HTTPError("Error downloading image: preview fallback was unavailable")
+        else:
+            preview_candidates = self._build_preview_candidates(
+                preview_url,
+                prefer_fhd=True,
+            )
+
+            last_error: HTTPError | None = None
+            for candidate in preview_candidates:
+                self.url = candidate
+                try:
+                    saved_path = await super()._perform_save(
+                        req_client, path_obj, filename, verbose
+                    )
+                    self.saved_quality = "preview"
+                    return saved_path
+                except HTTPError as e:
+                    last_error = e
+                    logger.debug(
+                        f"Failed to prefetch a Gemini preview fallback: {e}. Trying the next preview source."
+                    )
+
+            if last_error is not None:
+                raise last_error
+            raise HTTPError("Error downloading image: preview fallback was unavailable")

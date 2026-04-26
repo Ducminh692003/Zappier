@@ -165,6 +165,13 @@ class Model(Enum):
 
     @classmethod
     def from_name(cls, name: str) -> "Model":
+        aliases = {
+            "gemini-3.0-pro": cls.ADVANCED_PRO.model_name,
+            "gemini-3.1-pro": cls.ADVANCED_PRO.model_name,
+            "gemini-3.1-pro-advanced": cls.ADVANCED_PRO.model_name,
+        }
+        name = aliases.get(name, name)
+
         for model in cls:
             if model.model_name == name:
                 return model
