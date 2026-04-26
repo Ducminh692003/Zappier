@@ -1198,19 +1198,6 @@ class GeminiLocalService:
             preferred_preview_size=normalize_preview_size(record.get("preferredPreviewSize")),
         )
 
-    def _promote_preview_to_cached_file(self, record: dict[str, Any]) -> Path | None:
-        preview_path = self._generated_image_preview_path(record)
-        browser_quality = self._infer_generated_browser_quality(record.get("browserUrl"))
-        if preview_path is None or browser_quality not in {"fhd", "max"}:
-            return None
-
-        target_dir = IMAGE_CACHE_DIR / record["requestTag"]
-        target_dir.mkdir(parents=True, exist_ok=True)
-        dest = target_dir / f"image_{record['index']}.png"
-        if not dest.exists():
-            dest.write_bytes(preview_path.read_bytes())
-        return dest
-
     async def _cache_generated_image_record(self, token: str) -> dict[str, Any]:
         await self.ensure_ready()
         assert self.client is not None
@@ -1222,22 +1209,6 @@ class GeminiLocalService:
         existing_path = self._generated_image_file_path(record)
         if existing_path is not None:
             record["cacheStatus"] = "ready"
-            return record
-
-        promoted_path = self._promote_preview_to_cached_file(record)
-        if promoted_path is not None:
-            browser_quality = self._infer_generated_browser_quality(record.get("browserUrl"))
-            relative_path = promoted_path.relative_to(IMAGE_CACHE_DIR).as_posix()
-            record["cachedRelativePath"] = relative_path
-            record["downloadName"] = promoted_path.name
-            record["quality"] = browser_quality
-            record["cacheStatus"] = "ready"
-            record["error"] = None
-            append_runtime_log(
-                "INFO",
-                "Promoted Gemini preview image "
-                f"{record['index'] + 1} into local {browser_quality.upper()} cache without refetching.",
-            )
             return record
 
         image = self._build_generated_image_from_record(record)

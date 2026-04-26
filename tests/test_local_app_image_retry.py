@@ -619,6 +619,67 @@ class TestLocalAppImageRetry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generated["cacheStatus"], "caching")
         start_cache.assert_called_once_with(generated["token"], delay_seconds=1.5)
 
+    async def test_full_size_cache_does_not_promote_preview_file(self):
+        service = local_app.GeminiLocalService()
+        service.client = make_fake_client()
+        request_dir = local_app.IMAGE_CACHE_DIR / "generated-full-after-preview"
+
+        class FakeFullGeneratedImage(local_app.GeneratedImage):
+            async def save(
+                self,
+                path="temp",
+                filename=None,
+                verbose=False,
+                client=None,
+                **kwargs,
+            ):
+                path_obj = Path(path)
+                path_obj.mkdir(parents=True, exist_ok=True)
+                dest = path_obj / f"{Path(filename).stem}.png"
+                dest.write_bytes(b"full")
+                self.saved_quality = "full"
+                self.preview_url = self.preview_url or self.url
+                return str(dest.resolve())
+
+        try:
+            preview_path = request_dir / "image_0_preview.png"
+            request_dir.mkdir(parents=True, exist_ok=True)
+            preview_path.write_bytes(b"preview")
+
+            with patch.object(local_app, "GeneratedImage", FakeFullGeneratedImage):
+                image = FakeFullGeneratedImage(
+                    url="https://lh3.googleusercontent.com/gg-dl/token",
+                    preview_url="https://lh3.googleusercontent.com/gg-dl/token",
+                    title="[Generated Image 0]",
+                    alt="red-lantern",
+                    cid="cid",
+                    rid="rid",
+                    rcid="rcid",
+                    image_id="image-id",
+                )
+                record = service._register_generated_image(
+                    image,
+                    "generated-full-after-preview",
+                    0,
+                )
+                record["previewRelativePath"] = (
+                    "generated-full-after-preview/image_0_preview.png"
+                )
+                record["browserUrl"] = "https://lh3.googleusercontent.com/gg-dl/token=s2048"
+
+                await service._cache_generated_image_record(record["token"])
+
+            cached_path = local_app.IMAGE_CACHE_DIR / record["cachedRelativePath"]
+            self.assertEqual(cached_path.read_bytes(), b"full")
+            self.assertEqual(record["quality"], "full")
+            self.assertEqual(record["cacheStatus"], "ready")
+        finally:
+            if request_dir.exists():
+                for child in request_dir.iterdir():
+                    if child.is_file():
+                        child.unlink()
+                request_dir.rmdir()
+
     async def test_reprobe_auth_is_blocked_while_session_is_busy(self):
         service = local_app.GeminiLocalService()
         service.client = SimpleNamespace(configured_cookie_fingerprint="stale")

@@ -104,6 +104,42 @@ class TestImageDownloadFlow(unittest.IsolatedAsyncioTestCase):
             self.assertIn("=s4096", client.urls[0])
             self.assertEqual(image.saved_quality, "max")
 
+    async def test_generated_image_save_uses_rpc_full_size_suffix_first(self):
+        image = GeneratedImage(
+            url="https://lh3.googleusercontent.com/gg-dl/image_token",
+            preview_url="https://lh3.googleusercontent.com/gg-dl/image_token",
+            client_ref=FakeClientRef("https://lh3.googleusercontent.com/fife/full_size_token"),
+            cid="cid",
+            rid="rid",
+            rcid="rcid",
+            image_id="image-id",
+        )
+        client = FakeClient(
+            [
+                FakeResponse(200, "text/plain", text="https://work.fife.usercontent.google.com/rd-gg-dl/full-token"),
+                FakeResponse(200, "image/png", content=b"png-bytes"),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            saved_path = await image._perform_save(
+                client,
+                Path(temp_dir),
+                "generated",
+                verbose=False,
+                full_size=True,
+            )
+
+            self.assertTrue(Path(saved_path).exists())
+            self.assertEqual(
+                client.urls,
+                [
+                    "https://lh3.googleusercontent.com/fife/full_size_token=s0-d?alr=yes",
+                    "https://work.fife.usercontent.google.com/rd-gg-dl/full-token",
+                ],
+            )
+            self.assertEqual(image.saved_quality, "full")
+
     async def test_generated_image_save_falls_back_to_preview_when_full_size_fails(self):
         image = GeneratedImage(
             url="https://lh3.googleusercontent.com/gg-dl/image_token",
@@ -116,6 +152,8 @@ class TestImageDownloadFlow(unittest.IsolatedAsyncioTestCase):
         )
         client = FakeClient(
             [
+                FakeResponse(403, "text/html", reason="Forbidden"),
+                FakeResponse(403, "text/html", reason="Forbidden"),
                 FakeResponse(403, "text/html", reason="Forbidden"),
                 FakeResponse(403, "text/html", reason="Forbidden"),
                 FakeResponse(200, "text/plain", text="https://work.fife.usercontent.google.com/rd-gg-dl/token"),
@@ -136,7 +174,9 @@ class TestImageDownloadFlow(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 client.urls,
                 [
+                    "https://lh3.googleusercontent.com/fife/full_size_token=s0-d?alr=yes",
                     "https://lh3.googleusercontent.com/fife/full_size_token=d-I?alr=yes",
+                    "https://lh3.googleusercontent.com/fife/full_size_token",
                     "https://lh3.googleusercontent.com/gg-dl/image_token=s2048",
                     "https://lh3.googleusercontent.com/gg-dl/image_token",
                     "https://work.fife.usercontent.google.com/rd-gg-dl/token",

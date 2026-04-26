@@ -224,7 +224,23 @@ class GeneratedImage(Image):
 
     @classmethod
     def _build_full_size_candidate(cls, url: str) -> str | None:
-        return cls._build_handoff_candidate(url)
+        base = cls._build_base_candidate(url)
+        if not base:
+            return None
+        return f"{base}=s0-d?alr=yes"
+
+    @classmethod
+    def _build_full_size_candidates(cls, url: str) -> list[str]:
+        candidates: list[str] = []
+
+        def add(candidate: str | None) -> None:
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        add(cls._build_full_size_candidate(url))
+        add(cls._build_handoff_candidate(url))
+        add(url)
+        return candidates
 
     @classmethod
     def _build_scaled_candidate(cls, url: str, size: int) -> str | None:
@@ -303,18 +319,19 @@ class GeneratedImage(Image):
                         image_id=self.image_id,
                     )
                     if original_url:
-                        self.url = f"{original_url}=d-I?alr=yes"
-                        try:
-                            saved_path = await super()._perform_save(
-                                req_client, path_obj, filename, verbose
-                            )
-                            self.saved_quality = "full"
-                            return saved_path
-                        except HTTPError as e:
-                            self.url = preview_url
-                            logger.debug(
-                                f"Failed to download Gemini full-size image: {e}. Falling back to preview URL."
-                            )
+                        for candidate in self._build_full_size_candidates(original_url):
+                            self.url = candidate
+                            try:
+                                saved_path = await super()._perform_save(
+                                    req_client, path_obj, filename, verbose
+                                )
+                                self.saved_quality = "full"
+                                return saved_path
+                            except HTTPError as e:
+                                self.url = preview_url
+                                logger.debug(
+                                    f"Failed to download Gemini full-size image: {e}. Trying the next full-size source."
+                                )
 
                 except Exception as e:
                     self.url = preview_url
