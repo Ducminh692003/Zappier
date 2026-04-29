@@ -1,4 +1,5 @@
 import sys
+import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,6 +64,108 @@ class FakeQueueingSuspendedChat:
             queueing=True,
             request_id=725336,
         )
+
+
+class FakeNoSignalChat:
+    def __init__(self, sleep_seconds=30.0):
+        self.calls = []
+        self.cancelled = False
+        self.sleep_seconds = sleep_seconds
+
+    async def send_message_stream(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        try:
+            await asyncio.sleep(self.sleep_seconds)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if False:
+            yield None
+
+
+class FakeSubmittedBeforeOutputChat:
+    def __init__(self, output=None, sleep_seconds=0.03):
+        self.calls = []
+        self.output = output or FakeOutput(metadata=["c_submitted", "r_submitted"])
+        self.sleep_seconds = sleep_seconds
+
+    async def send_message_stream(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        stream_state = kwargs.get("stream_state")
+        if stream_state is not None:
+            stream_state["cid"] = "c_submitted"
+            stream_state["rid"] = "r_submitted"
+            stream_state["submission_seen"] = True
+        await asyncio.sleep(self.sleep_seconds)
+        yield self.output
+
+
+class FakeAcceptedNoOutputHangingChat:
+    def __init__(self, sleep_seconds=30.0):
+        self.calls = []
+        self.cancelled = False
+        self.sleep_seconds = sleep_seconds
+
+    async def send_message_stream(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        stream_state = kwargs.get("stream_state")
+        if stream_state is not None:
+            stream_state["cid"] = "c_pending"
+            stream_state["rid"] = "r_pending"
+            stream_state["submission_seen"] = True
+            stream_state["submitted_at"] = local_app.time.monotonic()
+        try:
+            await asyncio.sleep(self.sleep_seconds)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if False:
+            yield None
+
+
+class FakeToolThenSuspendedChat:
+    def __init__(self):
+        self.calls = []
+
+    async def send_message_stream(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        stream_state = kwargs.get("stream_state")
+        if stream_state is not None:
+            stream_state["tool_name"] = "image_generation_tool"
+            stream_state["thinking"] = True
+            stream_state["submission_seen"] = True
+        if False:
+            yield None
+        raise local_app.StreamSuspendedError(
+            "The original request may have been silently aborted by Google.",
+            completed=False,
+            final_chunk=False,
+            thinking=False,
+            queueing=False,
+            request_id=639373,
+        )
+
+
+class FakeQueueingNoCidHangingChat:
+    def __init__(self, sleep_seconds=30.0):
+        self.calls = []
+        self.cancelled = False
+        self.sleep_seconds = sleep_seconds
+
+    async def send_message_stream(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        stream_state = kwargs.get("stream_state")
+        if stream_state is not None:
+            stream_state["queueing"] = True
+            stream_state["frame_seen"] = True
+            stream_state["submission_seen"] = True
+        try:
+            await asyncio.sleep(self.sleep_seconds)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if False:
+            yield None
 
 
 class FakeSavedImage:
@@ -170,6 +273,28 @@ class TestLocalAppImageRetry(unittest.IsolatedAsyncioTestCase):
     def test_stream_watchdog_uses_shorter_suspended_detection_window(self):
         self.assertEqual(local_app.resolve_stream_watchdog_timeout(False), 20.0)
         self.assertEqual(local_app.resolve_stream_watchdog_timeout(True), 45.0)
+
+    def test_history_recovery_timeout_allows_reauth_despite_cid(self):
+        service = local_app.GeminiLocalService()
+        exc = local_app.StreamSuspendedError(
+            "Gemini assigned a CID but did not commit the response to history before recovery timed out.",
+            completed=False,
+            final_chunk=False,
+            thinking=False,
+            queueing=False,
+            request_id=123,
+        )
+
+        should_retry = service._should_auto_reprobe_stream_error(
+            exc,
+            stream_state={
+                "cid": "c_pending",
+                "history_recovery_failed": True,
+                "final_chunk": False,
+            },
+        )
+
+        self.assertTrue(should_retry)
 
     async def test_image_prompt_uses_default_image_path_and_honors_timeout(self):
         service = local_app.GeminiLocalService()
@@ -866,7 +991,279 @@ class TestLocalAppImageRetry(unittest.IsolatedAsyncioTestCase):
         final_event = next(event for event in events if event.get("type") == "final")
         self.assertEqual(final_event["text"], "done")
 
-    async def test_sync_request_reauths_after_typed_queueing_suspend_without_log(self):
+    async def test_sync_image_request_reauths_after_no_submission_signal(self):
+        service = local_app.GeminiLocalService()
+        no_signal_chat = FakeNoSignalChat()
+        recovered_chat = FakeChat()
+        fake_client = SimpleNamespace(timeout=30.0, watchdog_timeout=30.0)
+
+        service.client = fake_client
+        service.chat = no_signal_chat
+        service.current_model = "gemini-3-flash"
+        service.ensure_ready = AsyncMock()
+        service.check_history = AsyncMock(
+            return_value=local_app.build_history_state(
+                cid="",
+                status="missing",
+                message="missing",
+                checked=True,
+                saved=False,
+            )
+        )
+
+        async def fake_reprobe(force=False):
+            service.chat = recovered_chat
+            return True
+
+        service.reprobe_auth = AsyncMock(side_effect=fake_reprobe)
+
+        payload = local_app.ChatRequest(
+            prompt="Generate an image after a no-signal hang.",
+            model="gemini-3-flash",
+            timeout_seconds=60,
+        )
+
+        with patch.object(local_app, "IMAGE_SUBMISSION_GRACE_SECONDS", 0.01):
+            result = await service.ask(payload)
+
+        self.assertEqual(result["text"], "done")
+        self.assertTrue(no_signal_chat.cancelled)
+        self.assertEqual(len(no_signal_chat.calls), 1)
+        self.assertEqual(len(recovered_chat.calls), 1)
+        service.reprobe_auth.assert_awaited_once_with(force=True)
+        self.assertTrue(
+            any("No Gemini submission signal" in entry["message"] for entry in local_app.LOG_BUFFER)
+        )
+
+    async def test_stream_image_request_reauths_after_no_submission_signal(self):
+        service = local_app.GeminiLocalService()
+        no_signal_chat = FakeNoSignalChat()
+        recovered_chat = FakeChat()
+        fake_client = SimpleNamespace(timeout=30.0, watchdog_timeout=30.0)
+
+        service.client = fake_client
+        service.chat = no_signal_chat
+        service.current_model = "gemini-3-flash"
+        service.ensure_ready = AsyncMock()
+        service.check_history = AsyncMock(
+            return_value=local_app.build_history_state(
+                cid="",
+                status="missing",
+                message="missing",
+                checked=True,
+                saved=False,
+            )
+        )
+
+        async def fake_reprobe(force=False):
+            service.chat = recovered_chat
+            return True
+
+        service.reprobe_auth = AsyncMock(side_effect=fake_reprobe)
+
+        payload = local_app.ChatRequest(
+            prompt="Generate an image after a stream no-signal hang.",
+            model="gemini-3-flash",
+            timeout_seconds=60,
+        )
+
+        events = []
+        with patch.object(local_app, "IMAGE_SUBMISSION_GRACE_SECONDS", 0.01):
+            async for event in service.stream_chat_events(payload):
+                events.append(event)
+
+        self.assertTrue(no_signal_chat.cancelled)
+        self.assertEqual(len(no_signal_chat.calls), 1)
+        self.assertEqual(len(recovered_chat.calls), 1)
+        service.reprobe_auth.assert_awaited_once_with(force=True)
+        self.assertTrue(
+            any("No Gemini submission signal" in event.get("message", "") for event in events)
+        )
+        final_event = next(event for event in events if event.get("type") == "final")
+        self.assertEqual(final_event["text"], "done")
+
+    async def test_stream_image_request_reauths_after_cid_without_visible_output(self):
+        service = local_app.GeminiLocalService()
+        accepted_chat = FakeAcceptedNoOutputHangingChat()
+        recovered_chat = FakeChat()
+        fake_client = SimpleNamespace(timeout=30.0, watchdog_timeout=30.0)
+
+        service.client = fake_client
+        service.chat = accepted_chat
+        service.current_model = "gemini-3-flash"
+        service.ensure_ready = AsyncMock()
+        service.check_history = AsyncMock(
+            return_value=local_app.build_history_state(
+                cid="c_pending",
+                status="pending",
+                message="pending",
+                checked=False,
+                saved=False,
+            )
+        )
+
+        async def fake_reprobe(force=False):
+            service.chat = recovered_chat
+            return True
+
+        service.reprobe_auth = AsyncMock(side_effect=fake_reprobe)
+
+        payload = local_app.ChatRequest(
+            prompt="Generate an image after CID confirmation but no payload.",
+            model="gemini-3-flash",
+            timeout_seconds=60,
+        )
+
+        events = []
+        with patch.object(local_app, "IMAGE_ACCEPTED_NO_OUTPUT_SECONDS", 0.01):
+            async for event in service.stream_chat_events(payload):
+                events.append(event)
+
+        self.assertTrue(accepted_chat.cancelled)
+        self.assertEqual(len(accepted_chat.calls), 1)
+        self.assertEqual(len(recovered_chat.calls), 1)
+        service.reprobe_auth.assert_awaited_once_with(force=True)
+        self.assertTrue(
+            any(
+                "accepted the request but did not produce" in event.get("message", "")
+                for event in events
+            )
+        )
+        final_event = next(event for event in events if event.get("type") == "final")
+        self.assertEqual(final_event["text"], "done")
+
+    async def test_stream_image_request_reauths_when_queueing_never_gets_cid(self):
+        service = local_app.GeminiLocalService()
+        queueing_chat = FakeQueueingNoCidHangingChat()
+        recovered_chat = FakeChat()
+        fake_client = SimpleNamespace(timeout=30.0, watchdog_timeout=30.0)
+
+        service.client = fake_client
+        service.chat = queueing_chat
+        service.current_model = "gemini-3-flash"
+        service.ensure_ready = AsyncMock()
+        service.check_history = AsyncMock(
+            return_value=local_app.build_history_state(
+                cid="",
+                status="missing",
+                message="missing",
+                checked=True,
+                saved=False,
+            )
+        )
+
+        async def fake_reprobe(force=False):
+            service.chat = recovered_chat
+            return True
+
+        service.reprobe_auth = AsyncMock(side_effect=fake_reprobe)
+
+        payload = local_app.ChatRequest(
+            prompt="Generate an image after queueing without CID.",
+            model="gemini-3-flash",
+            timeout_seconds=60,
+        )
+
+        events = []
+        with patch.object(local_app, "IMAGE_SUBMISSION_GRACE_SECONDS", 0.01):
+            async for event in service.stream_chat_events(payload):
+                events.append(event)
+
+        self.assertTrue(queueing_chat.cancelled)
+        self.assertEqual(len(queueing_chat.calls), 1)
+        self.assertEqual(len(recovered_chat.calls), 1)
+        service.reprobe_auth.assert_awaited_once_with(force=True)
+        self.assertTrue(
+            any(event.get("message") == local_app.QUEUEING_NO_CID_MESSAGE for event in events)
+        )
+        self.assertTrue(
+            any("No Gemini submission signal" in event.get("message", "") for event in events)
+        )
+        final_event = next(event for event in events if event.get("type") == "final")
+        self.assertEqual(final_event["text"], "done")
+
+    async def test_stream_image_request_reauths_after_tool_activity_without_cid(self):
+        service = local_app.GeminiLocalService()
+        suspended_chat = FakeToolThenSuspendedChat()
+        recovered_chat = FakeChat()
+        fake_client = SimpleNamespace(timeout=30.0, watchdog_timeout=30.0)
+
+        service.client = fake_client
+        service.chat = suspended_chat
+        service.current_model = "gemini-3-flash"
+        service.ensure_ready = AsyncMock()
+        service.check_history = AsyncMock(
+            return_value=local_app.build_history_state(
+                cid="",
+                status="missing",
+                message="missing",
+                checked=True,
+                saved=False,
+            )
+        )
+
+        async def fake_reprobe(force=False):
+            service.chat = recovered_chat
+            return True
+
+        service.reprobe_auth = AsyncMock(side_effect=fake_reprobe)
+
+        payload = local_app.ChatRequest(
+            prompt="Generate an image after tool activity without CID.",
+            model="gemini-3-flash",
+            timeout_seconds=60,
+        )
+
+        events = []
+        async for event in service.stream_chat_events(payload):
+            events.append(event)
+
+        self.assertEqual(len(suspended_chat.calls), 1)
+        self.assertEqual(len(recovered_chat.calls), 1)
+        service.reprobe_auth.assert_awaited_once_with(force=True)
+        self.assertTrue(
+            any(event.get("message") == local_app.AUTO_REAUTH_STATUS_MESSAGE for event in events)
+        )
+        final_event = next(event for event in events if event.get("type") == "final")
+        self.assertEqual(final_event["text"], "done")
+
+    async def test_stream_image_request_keeps_waiting_after_cid_submission_signal(self):
+        service = local_app.GeminiLocalService()
+        submitted_chat = FakeSubmittedBeforeOutputChat(sleep_seconds=0.03)
+        fake_client = SimpleNamespace(timeout=30.0, watchdog_timeout=30.0)
+
+        service.client = fake_client
+        service.chat = submitted_chat
+        service.current_model = "gemini-3-flash"
+        service.ensure_ready = AsyncMock()
+        service.reprobe_auth = AsyncMock(return_value=True)
+        service.check_history = AsyncMock(
+            return_value=local_app.build_history_state(
+                cid="c_submitted",
+                status="pending",
+                message="pending",
+                checked=False,
+                saved=False,
+            )
+        )
+
+        payload = local_app.ChatRequest(
+            prompt="Generate an image after CID confirmation.",
+            model="gemini-3-flash",
+            timeout_seconds=60,
+        )
+
+        events = []
+        with patch.object(local_app, "IMAGE_SUBMISSION_GRACE_SECONDS", 0.01):
+            async for event in service.stream_chat_events(payload):
+                events.append(event)
+
+        self.assertEqual(len(submitted_chat.calls), 1)
+        service.reprobe_auth.assert_not_awaited()
+        final_event = next(event for event in events if event.get("type") == "final")
+        self.assertEqual(final_event["metadata"], ["c_submitted", "r_submitted"])
+
+    async def test_sync_request_reauths_after_queueing_suspend_without_cid(self):
         service = local_app.GeminiLocalService()
         abort_chat = FakeQueueingSuspendedChat()
         recovered_chat = FakeChat()
@@ -905,7 +1302,7 @@ class TestLocalAppImageRetry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(recovered_chat.calls), 1)
         service.reprobe_auth.assert_awaited_once_with(force=True)
 
-    async def test_stream_request_reauths_after_typed_queueing_suspend_without_log(self):
+    async def test_stream_request_reauths_after_queueing_suspend_without_cid(self):
         service = local_app.GeminiLocalService()
         abort_chat = FakeQueueingSuspendedChat()
         recovered_chat = FakeChat()
@@ -944,7 +1341,9 @@ class TestLocalAppImageRetry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(abort_chat.calls), 1)
         self.assertEqual(len(recovered_chat.calls), 1)
         service.reprobe_auth.assert_awaited_once_with(force=True)
-        self.assertTrue(any(event.get("message") == local_app.AUTO_REAUTH_STATUS_MESSAGE for event in events))
+        self.assertTrue(
+            any(event.get("message") == local_app.AUTO_REAUTH_STATUS_MESSAGE for event in events)
+        )
         final_event = next(event for event in events if event.get("type") == "final")
         self.assertEqual(final_event["text"], "done")
 

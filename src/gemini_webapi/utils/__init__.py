@@ -2,6 +2,11 @@
 
 from .decorators import running
 from .get_access_token import build_cookie_fingerprint, get_access_token
+from .http_session import (
+    create_gemini_session,
+    resolve_browser_impersonate,
+    resolve_gemini_proxy,
+)
 from .load_browser_cookies import load_browser_cookies
 from .logger import logger, set_log_level
 from .parsing import (

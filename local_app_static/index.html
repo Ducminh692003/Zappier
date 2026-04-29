@@ -1456,7 +1456,9 @@
           const elapsed = Math.floor((Date.now() - startedAt) / 1000);
           const label = formatElapsed(elapsed);
           const waitMessage =
-            state.text || state.images?.length
+            state.backendStatusMessage && !state.text && !state.images?.length
+              ? state.backendStatusMessage
+              : state.text || state.images?.length
               ? `Gemini is still finalizing the response. Elapsed ${label}.`
               : `Waiting for Gemini output. Elapsed ${label} / timeout ${formatElapsed(timeoutSeconds)}.`;
 
@@ -1472,7 +1474,9 @@
           if (bucket > lastLoggedBucket && elapsed > 0) {
             lastLoggedBucket = bucket;
             pushLiveLog(
-              elapsed < 5
+              state.backendStatusMessage && !state.text && !state.images?.length
+                ? state.backendStatusMessage
+                : elapsed < 5
                 ? "Request is open. Waiting for Gemini to acknowledge the stream."
                 : `Gemini still processing after ${label}.`,
               "INFO",
@@ -2237,6 +2241,7 @@
           chatId: "",
           temporary,
           statusMessage: "Waiting for Gemini to send visible output...",
+          backendStatusMessage: "",
           error: false,
         };
         activeModel.textContent = renderModelLabel(model, imageMode);
@@ -2304,6 +2309,7 @@
               }
 
               if (event.type === "heartbeat") {
+                state.backendStatusMessage = event.message || state.backendStatusMessage;
                 state.statusMessage = event.message;
                 pushLiveLog(event.message, "INFO");
                 if (!state.text) {
@@ -2313,6 +2319,7 @@
               }
 
               if (event.type === "status") {
+                state.backendStatusMessage = event.message || state.backendStatusMessage;
                 state.statusMessage = event.message;
                 pushLiveLog(event.message, event.level || "INFO");
                 if (!state.text) {

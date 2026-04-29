@@ -1,4 +1,5 @@
 import hashlib
+import os
 import random
 import re
 import time
@@ -8,6 +9,7 @@ import orjson as json
 
 from .load_browser_cookies import HAS_BC3, load_browser_cookies
 from .logger import logger
+from .http_session import create_gemini_session
 from .parsing import extract_json_from_response, get_nested_value
 from .rotate_1psidts import (
     _extract_cookie_value,
@@ -148,6 +150,7 @@ async def get_access_token(
     proxy: str | None = None,
     verbose: bool = False,
     verify: bool = True,
+    **session_kwargs,
 ) -> tuple[str | None, str | None, str | None, str | None, str | None, AsyncSession]:
     """
     Send a get request to gemini.google.com for each group of available cookies and return
@@ -178,8 +181,10 @@ async def get_access_token(
         If all requests failed.
     """
 
-    client = AsyncSession(
-        impersonate="chrome", proxy=proxy, allow_redirects=True, verify=verify
+    client = create_gemini_session(
+        proxy=proxy,
+        verify=verify,
+        **session_kwargs,
     )
 
     try:
@@ -324,6 +329,28 @@ async def get_access_token(
         if verbose:
             logger.debug(
                 "Skipping loading local browser cookies (Not available or no permission)."
+            )
+
+    prefer_browser_cookies = os.getenv(
+        "GEMINI_PREFER_BROWSER_COOKIES",
+        "1",
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    if prefer_browser_cookies:
+        def auth_priority(candidate: tuple[Cookies, str, str, str | None]) -> int:
+            auth_source = candidate[1]
+            if auth_source.startswith("browser:"):
+                return 0
+            if auth_source == "explicit":
+                return 1
+            return 2
+
+        cookie_jars_to_test.sort(key=auth_priority)
+        if verbose and any(
+            auth_source.startswith("browser:")
+            for _, auth_source, _, _ in cookie_jars_to_test
+        ):
+            logger.debug(
+                "Prioritizing matching browser cookies for Gemini auth to keep media sessions fresh."
             )
 
     current_attempt = 0

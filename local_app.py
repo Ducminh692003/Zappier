@@ -25,7 +25,11 @@ from pydantic import BaseModel, Field
 from gemini_webapi import GeminiClient, StreamSuspendedError, logger as gemini_logger
 from gemini_webapi.constants import AccountStatus, Headers, Model
 from gemini_webapi.types import GeneratedImage
-from gemini_webapi.utils import build_cookie_fingerprint
+from gemini_webapi.utils import (
+    build_cookie_fingerprint,
+    resolve_browser_impersonate,
+    resolve_gemini_proxy,
+)
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "local_app_static"
@@ -35,7 +39,7 @@ IMAGE_CACHE_DIR = ROOT / "temp" / "local_app_images"
 INPUT_UPLOAD_DIR = ROOT / "temp" / "local_app_inputs"
 REQUIRED_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS")
 DEFAULT_CHAT_TIMEOUT = 150.0
-APP_VERSION = "0.8.6"
+APP_VERSION = "0.8.7"
 LOG_BUFFER: deque[dict[str, Any]] = deque(maxlen=800)
 LOG_COUNTER = count(1)
 AUTO_REAUTH_ABORT_TEXT = "The original request may have been silently aborted by Google."
@@ -44,11 +48,97 @@ AUTO_REAUTH_STATUS_MESSAGE = (
     "Gemini stalled before it exposed a recoverable chat ID. "
     "Re-authenticating the session and retrying this request once."
 )
+IMAGE_NO_PAYLOAD_RETRY_MESSAGE = (
+    "Gemini returned an image-style response without an image payload. "
+    "Re-authenticating and retrying the image request."
+)
 MAX_AUTO_REAUTH_RETRIES = 2
+IMAGE_MAX_AUTO_REAUTH_RETRIES = 4
 STANDARD_STREAM_WATCHDOG_SECONDS = 20.0
 IMAGE_STREAM_WATCHDOG_SECONDS = 45.0
+IMAGE_SUBMISSION_GRACE_SECONDS = 20.0
+IMAGE_ACCEPTED_NO_OUTPUT_SECONDS = 60.0
+IMAGE_NO_PAYLOAD_GRACE_SECONDS = 120.0
+SUBMISSION_WAITING_MESSAGE = "Waiting for Gemini submission confirmation..."
+QUEUEING_NO_CID_MESSAGE = "Gemini reported queueing, but no CID yet. Waiting for CID before treating this as submitted."
 PRO_FULL_SIZE_CACHE_ATTEMPTS = 8
 PRO_FULL_SIZE_CACHE_RETRY_SECONDS = 8.0
+
+
+class GeminiSubmissionTimeoutError(RuntimeError):
+    """
+    Raised when Gemini opens no observable submission signal before the local grace window.
+    """
+
+
+def format_seconds_for_status(seconds: float) -> str:
+    if seconds >= 1:
+        return f"{int(round(seconds))}s"
+    return f"{seconds:.1f}s"
+
+
+def build_no_submission_retry_message(seconds: float = IMAGE_SUBMISSION_GRACE_SECONDS) -> str:
+    return (
+        f"No Gemini submission signal after {format_seconds_for_status(seconds)}. "
+        "Re-authing and retrying safely."
+    )
+
+
+def resolve_max_auto_reauth_retries(prompt_looks_like_image: bool) -> int:
+    return IMAGE_MAX_AUTO_REAUTH_RETRIES if prompt_looks_like_image else MAX_AUTO_REAUTH_RETRIES
+
+
+def build_accepted_no_output_retry_message(
+    seconds: float = IMAGE_ACCEPTED_NO_OUTPUT_SECONDS,
+) -> str:
+    return (
+        "Gemini accepted the request but did not produce any visible output after "
+        f"{format_seconds_for_status(seconds)}. Re-authing and retrying safely."
+    )
+
+
+def build_no_image_payload_retry_message(
+    seconds: float = IMAGE_NO_PAYLOAD_GRACE_SECONDS,
+) -> str:
+    return (
+        "Gemini has not produced an image payload after "
+        f"{format_seconds_for_status(seconds)}. Re-authing and retrying the image request."
+    )
+
+
+def output_has_visible_payload(output: Any | None) -> bool:
+    if output is None:
+        return False
+    return bool(
+        (getattr(output, "text", "") or "").strip()
+        or (getattr(output, "text_delta", "") or "").strip()
+        or (getattr(output, "thoughts", "") or "").strip()
+        or (getattr(output, "thoughts_delta", "") or "").strip()
+        or list(getattr(output, "images", None) or [])
+        or list(getattr(output, "videos", None) or [])
+        or list(getattr(output, "media", None) or [])
+        or getattr(output, "deep_research_plan", None)
+    )
+
+
+def stream_state_has_submission_signal(stream_state: dict[str, Any] | None) -> bool:
+    if not stream_state:
+        return False
+    return bool(
+        stream_state_has_recoverable_cid(stream_state)
+        or stream_state.get("output_seen")
+    )
+
+
+def stream_state_has_recoverable_cid(stream_state: dict[str, Any] | None) -> bool:
+    if not stream_state:
+        return False
+    cid = stream_state.get("cid")
+    return isinstance(cid, str) and bool(cid.strip())
+
+
+def stream_error_is_queueing(exc: Exception) -> bool:
+    return isinstance(exc, StreamSuspendedError) and bool(getattr(exc, "queueing", False))
 
 
 def append_runtime_log(level: str, message: str) -> None:
@@ -521,6 +611,29 @@ def output_has_images(output: Any | None) -> bool:
     return bool(list(getattr(output, "images", None) or []))
 
 
+def output_suggests_retryable_image_miss(output: Any | None) -> bool:
+    if output is None or output_has_images(output):
+        return False
+
+    text = (getattr(output, "text", "") or "").strip().lower()
+    if not text:
+        return True
+
+    retry_markers = (
+        "signed in",
+        "can't create",
+        "cannot create",
+        "can't seem to create",
+        "not able to create",
+        "unable to create",
+        "image creation",
+        "image generation",
+        "not available",
+        "can search for images",
+    )
+    return any(marker in text for marker in retry_markers)
+
+
 def should_retry_standard_image_generation(
     *,
     prompt_looks_like_image: bool,
@@ -714,9 +827,13 @@ class GeminiLocalService:
                 "Missing GEMINI credentials. Paste raw cookies or set GEMINI_SECURE_1PSID in .env."
             )
 
+        proxy = resolve_gemini_proxy()
+        impersonate = resolve_browser_impersonate()
         client = GeminiClient(
             secure_1psid=secure_1psid,
             secure_1psidts=secure_1psidts,
+            proxy=proxy,
+            impersonate=impersonate,
         )
 
         extra_cookies = {
@@ -731,7 +848,8 @@ class GeminiLocalService:
             await client.init(
                 timeout=max(120, int(DEFAULT_CHAT_TIMEOUT)),
                 auto_close=False,
-                auto_refresh=False,
+                auto_refresh=True,
+                refresh_interval=300,
                 verbose=True,
             )
         except Exception:
@@ -758,6 +876,12 @@ class GeminiLocalService:
         self.available_models = discovered_models
         self.chat = client.start_chat(model=self.current_model)
         self.boot_error = None
+        append_runtime_log(
+            "INFO",
+            "Gemini HTTP session configured with "
+            f"curl_cffi impersonate={impersonate}, proxy={'enabled' if proxy else 'direct/trust_env'}, "
+            "auto-refresh=on.",
+        )
 
     async def reprobe_auth(self, force: bool = False) -> bool:
         cookies, source = self._resolve_configured_cookies()
@@ -963,8 +1087,18 @@ class GeminiLocalService:
         latest_output: Any | None = None,
         partial_text: str = "",
         partial_thoughts: str = "",
+        stream_state: dict[str, Any] | None = None,
     ) -> bool:
-        if latest_output is not None or partial_text or partial_thoughts:
+        if output_has_visible_payload(latest_output) or partial_text or partial_thoughts:
+            return False
+
+        if isinstance(exc, GeminiSubmissionTimeoutError):
+            return True
+
+        if stream_state and stream_state.get("history_recovery_failed"):
+            return True
+
+        if stream_state_has_recoverable_cid(stream_state):
             return False
 
         if isinstance(exc, StreamSuspendedError):
@@ -983,6 +1117,51 @@ class GeminiLocalService:
                 return True
 
         return False
+
+    async def _await_with_submission_watchdog(
+        self,
+        awaitable: Any,
+        *,
+        stream_state: dict[str, Any],
+        prompt_looks_like_image: bool,
+    ) -> Any:
+        if not prompt_looks_like_image:
+            return await awaitable
+
+        task = asyncio.create_task(awaitable)
+        try:
+            while not task.done():
+                if stream_state_has_submission_signal(stream_state):
+                    return await task
+
+                started_at = float(
+                    stream_state.get("local_send_started_at")
+                    or stream_state.get("started_at")
+                    or time.monotonic()
+                )
+                remaining = started_at + IMAGE_SUBMISSION_GRACE_SECONDS - time.monotonic()
+                if remaining <= 0:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    raise GeminiSubmissionTimeoutError(
+                        build_no_submission_retry_message(IMAGE_SUBMISSION_GRACE_SECONDS)
+                    )
+
+                done, _ = await asyncio.wait(
+                    {task},
+                    timeout=min(0.25, max(0.01, remaining)),
+                )
+                if done:
+                    return await task
+
+            return await task
+        except Exception:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            raise
 
     def _restart_chat_for_retry_locked(self) -> None:
         assert self.client is not None
@@ -1529,6 +1708,7 @@ class GeminiLocalService:
         while True:
             retry_after_reauth = False
             retry_standard_image_path = False
+            retry_status_message = AUTO_REAUTH_STATUS_MESSAGE
 
             async with self._chat_lock:
                 requested_image_use_pro = should_use_pro_image_path(
@@ -1538,6 +1718,9 @@ class GeminiLocalService:
                 )
                 prompt_looks_like_image = (
                     looks_like_image_prompt(payload.prompt) or requested_image_use_pro
+                )
+                max_auto_reauth_retries = resolve_max_auto_reauth_retries(
+                    prompt_looks_like_image
                 )
                 image_use_pro = (
                     requested_image_use_pro and not standard_image_fallback_attempted
@@ -1581,6 +1764,7 @@ class GeminiLocalService:
                 latest_output = None
                 partial_text = ""
                 partial_thoughts = ""
+                stream_state: dict[str, Any] = {}
                 retry_override = None if prompt_looks_like_image else 0
 
                 try:
@@ -1592,6 +1776,7 @@ class GeminiLocalService:
                                 "Image prompt detected. "
                                 f"Using {image_mode_label or 'Image generation'} mode.",
                             )
+                            append_runtime_log("INFO", SUBMISSION_WAITING_MESSAGE)
                         if request_files:
                             append_runtime_log(
                                 "INFO",
@@ -1602,6 +1787,7 @@ class GeminiLocalService:
                             f"chat request ({self.current_model})",
                             request_source,
                         ):
+                            stream_state["local_send_started_at"] = time.monotonic()
                             async for output in self.chat.send_message_stream(
                                 payload.prompt,
                                 files=request_files or None,
@@ -1609,12 +1795,26 @@ class GeminiLocalService:
                                 use_pro=image_use_pro,
                                 timeout=self.client.timeout,
                                 current_retry=retry_override,
+                                stream_state=stream_state,
                             ):
                                 latest_output = output
+                                if output_has_visible_payload(output):
+                                    stream_state["output_seen"] = True
+                                    stream_state["visible_output_seen"] = True
+                                if output_has_images(output):
+                                    stream_state["image_payload_seen"] = True
+                                stream_state["submission_seen"] = True
                                 partial_text += output.text_delta or ""
                                 partial_thoughts += output.thoughts_delta or ""
 
-                    await asyncio.wait_for(consume_stream(), timeout=effective_timeout + 15)
+                    await asyncio.wait_for(
+                        self._await_with_submission_watchdog(
+                            consume_stream(),
+                            stream_state=stream_state,
+                            prompt_looks_like_image=prompt_looks_like_image,
+                        ),
+                        timeout=effective_timeout + 15,
+                    )
                 except asyncio.TimeoutError as exc:
                     self.chat = self.client.start_chat(model=self.current_model)
                     raise TimeoutError(
@@ -1622,7 +1822,16 @@ class GeminiLocalService:
                         "or refresh cookies if the session looks stale."
                     ) from exc
                 except Exception as exc:
-                    if should_retry_standard_image_generation(
+                    if isinstance(exc, GeminiSubmissionTimeoutError):
+                        retry_status_message = build_no_submission_retry_message(
+                            IMAGE_SUBMISSION_GRACE_SECONDS
+                        )
+                        if reauth_attempts < max_auto_reauth_retries:
+                            retry_after_reauth = True
+                        else:
+                            append_runtime_log("ERROR", retry_status_message)
+                            raise
+                    elif should_retry_standard_image_generation(
                         prompt_looks_like_image=prompt_looks_like_image,
                         requested_use_pro=requested_image_use_pro,
                         active_use_pro=image_use_pro,
@@ -1674,13 +1883,20 @@ class GeminiLocalService:
                         }
 
                     if (
-                        reauth_attempts < MAX_AUTO_REAUTH_RETRIES
+                        reauth_attempts < max_auto_reauth_retries
                         and self._should_auto_reprobe_stream_error(
                             exc,
                             latest_output=latest_output,
                             partial_text=partial_text,
                             partial_thoughts=partial_thoughts,
+                            stream_state=stream_state,
                         )
+                    ):
+                        retry_after_reauth = True
+                    elif (
+                        reauth_attempts < max_auto_reauth_retries
+                        and AUTO_REAUTH_ABORT_TEXT in str(exc)
+                        and not stream_state_has_recoverable_cid(stream_state)
                     ):
                         retry_after_reauth = True
                     else:
@@ -1712,6 +1928,14 @@ class GeminiLocalService:
                             "WARNING",
                             "Nano Banana Pro path returned text without images. Retrying once with the standard Gemini image-generation path.",
                         )
+                    elif (
+                        prompt_looks_like_image
+                        and output_suggests_retryable_image_miss(latest_output)
+                        and reauth_attempts < max_auto_reauth_retries
+                    ):
+                        retry_after_reauth = True
+                        retry_status_message = IMAGE_NO_PAYLOAD_RETRY_MESSAGE
+                        append_runtime_log("WARNING", retry_status_message)
                     elif prompt_looks_like_image and not output_has_images(latest_output):
                         image_warning = (
                             "Gemini returned text without image payloads. Nano Banana Pro appears unavailable through the Gemini web reverse API for this session right now."
@@ -1723,7 +1947,9 @@ class GeminiLocalService:
                             "Gemini finished the image prompt without image payloads.",
                         )
 
-                    if not retry_standard_image_path:
+                    if retry_after_reauth:
+                        pass
+                    elif not retry_standard_image_path:
                         images = await self._materialize_images(
                             latest_output.images,
                             request_tag,
@@ -1756,8 +1982,8 @@ class GeminiLocalService:
             if retry_standard_image_path:
                 standard_image_fallback_attempted = True
                 continue
-            if retry_after_reauth and reauth_attempts < MAX_AUTO_REAUTH_RETRIES:
-                append_runtime_log("WARNING", AUTO_REAUTH_STATUS_MESSAGE)
+            if retry_after_reauth and reauth_attempts < max_auto_reauth_retries:
+                append_runtime_log("WARNING", retry_status_message)
                 await self.reprobe_auth(force=True)
                 reauth_attempts += 1
                 continue
@@ -1983,6 +2209,7 @@ class GeminiLocalService:
         while True:
             retry_after_reauth = False
             retry_standard_image_path = False
+            retry_status_message = AUTO_REAUTH_STATUS_MESSAGE
             log_cursor = get_latest_log_id()
 
             async with self._chat_lock:
@@ -1999,6 +2226,8 @@ class GeminiLocalService:
                 partial_thoughts = ""
                 seen_image_notice = False
                 preview_images: list[dict[str, Any]] = []
+                stream_state: dict[str, Any] = {}
+                queueing_notice_sent = False
                 requested_image_use_pro = should_use_pro_image_path(
                     prompt=payload.prompt,
                     requested_model=payload.model,
@@ -2006,6 +2235,9 @@ class GeminiLocalService:
                 )
                 prompt_looks_like_image = (
                     looks_like_image_prompt(payload.prompt) or requested_image_use_pro
+                )
+                max_auto_reauth_retries = resolve_max_auto_reauth_retries(
+                    prompt_looks_like_image
                 )
                 image_use_pro = (
                     requested_image_use_pro and not standard_image_fallback_attempted
@@ -2027,6 +2259,7 @@ class GeminiLocalService:
                     nonlocal preview_images
                     nonlocal retry_after_reauth
                     nonlocal retry_standard_image_path
+                    nonlocal retry_status_message
                     latest_output = None
 
                     async def emit_final(
@@ -2166,12 +2399,20 @@ class GeminiLocalService:
                                 "Image prompt detected. "
                                 f"Using {image_mode_label or 'Image generation'} mode.",
                             )
+                            append_runtime_log("INFO", SUBMISSION_WAITING_MESSAGE)
+                            await queue.put(
+                                {
+                                    "type": "status",
+                                    "message": SUBMISSION_WAITING_MESSAGE,
+                                }
+                            )
 
                         assert self.chat is not None
                         async with self._hold_session_activity(
                             f"chat stream ({self.current_model})",
                             request_source,
                         ):
+                            stream_state["local_send_started_at"] = time.monotonic()
                             async for output in self.chat.send_message_stream(
                                 payload.prompt,
                                 files=request_files or None,
@@ -2179,8 +2420,13 @@ class GeminiLocalService:
                                 use_pro=image_use_pro,
                                 timeout=self.client.timeout,
                                 current_retry=retry_override,
+                                stream_state=stream_state,
                             ):
                                 latest_output = output
+                                if output_has_visible_payload(output):
+                                    stream_state["output_seen"] = True
+                                    stream_state["visible_output_seen"] = True
+                                stream_state["submission_seen"] = True
 
                                 if output.thoughts_delta:
                                     partial_thoughts += output.thoughts_delta
@@ -2256,6 +2502,19 @@ class GeminiLocalService:
 
                         image_warning = None
                         if prompt_looks_like_image and not output_has_images(latest_output):
+                            if reauth_attempts < max_auto_reauth_retries:
+                                if output_suggests_retryable_image_miss(latest_output):
+                                    retry_after_reauth = True
+                                    retry_status_message = IMAGE_NO_PAYLOAD_RETRY_MESSAGE
+                                    append_runtime_log("WARNING", retry_status_message)
+                                    await queue.put(
+                                        {
+                                            "type": "status",
+                                            "level": "WARNING",
+                                            "message": retry_status_message,
+                                        }
+                                    )
+                                    return
                             image_warning = (
                                 "Gemini returned text without image payloads. Nano Banana Pro appears unavailable through the Gemini web reverse API for this session right now."
                                 if image_use_pro
@@ -2277,6 +2536,30 @@ class GeminiLocalService:
                         await emit_final(output=latest_output, warning=image_warning)
                     except Exception as exc:
                         error_text = str(exc)
+                        if prompt_looks_like_image:
+                            debug_state = {
+                                key: stream_state.get(key)
+                                for key in (
+                                    "cid",
+                                    "rid",
+                                    "output_seen",
+                                    "image_payload_seen",
+                                    "candidate_seen",
+                                    "thinking",
+                                    "tool_name",
+                                    "queueing",
+                                    "raw_chunk_seen",
+                                    "frame_seen",
+                                    "metadata_seen",
+                                    "submission_signal",
+                                    "submission_reason",
+                                )
+                                if key in stream_state
+                            }
+                            append_runtime_log(
+                                "DEBUG",
+                                f"Stream failure state: {debug_state}",
+                            )
                         if should_retry_standard_image_generation(
                             prompt_looks_like_image=prompt_looks_like_image,
                             requested_use_pro=requested_image_use_pro,
@@ -2298,7 +2581,27 @@ class GeminiLocalService:
                                     "imageMode": "Image generation",
                                 }
                             )
-                        elif latest_output is not None or partial_text or partial_thoughts:
+                        elif (
+                            prompt_looks_like_image
+                            and reauth_attempts < max_auto_reauth_retries
+                            and not output_has_images(latest_output)
+                            and "recovery timed out" in error_text.lower()
+                        ):
+                            retry_after_reauth = True
+                            retry_status_message = build_no_image_payload_retry_message()
+                            append_runtime_log("WARNING", retry_status_message)
+                            await queue.put(
+                                {
+                                    "type": "status",
+                                    "level": "WARNING",
+                                    "message": retry_status_message,
+                                }
+                            )
+                        elif (
+                            output_has_visible_payload(latest_output)
+                            or partial_text
+                            or partial_thoughts
+                        ):
                             warning = (
                                 "Gemini stopped after returning a partial response."
                                 if not prompt_looks_like_image
@@ -2324,15 +2627,32 @@ class GeminiLocalService:
                                 warning=warning,
                             )
                         elif (
-                            reauth_attempts < MAX_AUTO_REAUTH_RETRIES
+                            reauth_attempts < max_auto_reauth_retries
                             and self._should_auto_reprobe_stream_error(
                                 exc,
                                 latest_output=latest_output,
                                 partial_text=partial_text,
                                 partial_thoughts=partial_thoughts,
+                                stream_state=stream_state,
                             )
                         ):
                             retry_after_reauth = True
+                            retry_status_message = AUTO_REAUTH_STATUS_MESSAGE
+                            append_runtime_log("WARNING", AUTO_REAUTH_STATUS_MESSAGE)
+                            await queue.put(
+                                {
+                                    "type": "status",
+                                    "level": "WARNING",
+                                    "message": AUTO_REAUTH_STATUS_MESSAGE,
+                                }
+                            )
+                        elif (
+                            reauth_attempts < max_auto_reauth_retries
+                            and AUTO_REAUTH_ABORT_TEXT in error_text
+                            and not stream_state_has_recoverable_cid(stream_state)
+                        ):
+                            retry_after_reauth = True
+                            retry_status_message = AUTO_REAUTH_STATUS_MESSAGE
                             append_runtime_log("WARNING", AUTO_REAUTH_STATUS_MESSAGE)
                             await queue.put(
                                 {
@@ -2368,15 +2688,222 @@ class GeminiLocalService:
                                 "ts": entry["ts"],
                             }
 
+                        if (
+                            prompt_looks_like_image
+                            and stream_state.get("queueing")
+                            and not queueing_notice_sent
+                        ):
+                            queueing_notice_sent = True
+                            append_runtime_log("INFO", QUEUEING_NO_CID_MESSAGE)
+                            yield {
+                                "type": "status",
+                                "message": QUEUEING_NO_CID_MESSAGE,
+                            }
+
+                        accepted_no_output_started_at = None
+                        if (
+                            prompt_looks_like_image
+                            and stream_state_has_recoverable_cid(stream_state)
+                            and not stream_state.get("queueing")
+                            and not stream_state.get("thinking")
+                            and not stream_state.get("visible_output_seen")
+                            and not stream_state.get("output_seen")
+                            and not partial_text
+                            and not partial_thoughts
+                            and not seen_image_notice
+                        ):
+                            accepted_no_output_started_at = (
+                                stream_state.get("submitted_at")
+                                or stream_state.get("local_send_started_at")
+                                or stream_state.get("started_at")
+                            )
+
+                        no_image_payload_started_at = None
+                        if (
+                            prompt_looks_like_image
+                            and stream_state_has_submission_signal(stream_state)
+                            and not stream_state.get("queueing")
+                            and not stream_state.get("thinking")
+                            and not stream_state.get("image_payload_seen")
+                            and not seen_image_notice
+                            and (
+                                stream_state.get("visible_output_seen")
+                                or partial_text
+                                or partial_thoughts
+                            )
+                        ):
+                            no_image_payload_started_at = (
+                                stream_state.get("submitted_at")
+                                or stream_state.get("local_send_started_at")
+                                or stream_state.get("started_at")
+                            )
+
+                        if (
+                            prompt_looks_like_image
+                            and not stream_state_has_submission_signal(stream_state)
+                        ):
+                            send_started_at = stream_state.get("local_send_started_at")
+                            if send_started_at:
+                                no_signal_elapsed = time.monotonic() - float(send_started_at)
+                                if no_signal_elapsed >= IMAGE_SUBMISSION_GRACE_SECONDS:
+                                    retry_status_message = build_no_submission_retry_message(
+                                        IMAGE_SUBMISSION_GRACE_SECONDS
+                                    )
+                                    retry_after_reauth = (
+                                        reauth_attempts < max_auto_reauth_retries
+                                    )
+                                    append_runtime_log("WARNING", retry_status_message)
+                                    yield {
+                                        "type": "status",
+                                        "level": "WARNING",
+                                        "message": retry_status_message,
+                                    }
+                                    if not retry_after_reauth:
+                                        yield {
+                                            "type": "error",
+                                            "message": retry_status_message,
+                                        }
+                                    worker_task.cancel()
+                                    with suppress(asyncio.CancelledError):
+                                        await worker_task
+                                    break
+
+                        if accepted_no_output_started_at:
+                            accepted_no_output_elapsed = (
+                                time.monotonic() - float(accepted_no_output_started_at)
+                            )
+                            if (
+                                accepted_no_output_elapsed
+                                >= IMAGE_ACCEPTED_NO_OUTPUT_SECONDS
+                            ):
+                                retry_status_message = (
+                                    build_accepted_no_output_retry_message(
+                                        IMAGE_ACCEPTED_NO_OUTPUT_SECONDS
+                                    )
+                                )
+                                retry_after_reauth = (
+                                    reauth_attempts < max_auto_reauth_retries
+                                )
+                                append_runtime_log("WARNING", retry_status_message)
+                                yield {
+                                    "type": "status",
+                                    "level": "WARNING",
+                                    "message": retry_status_message,
+                                }
+                                if not retry_after_reauth:
+                                    yield {
+                                        "type": "error",
+                                        "message": retry_status_message,
+                                    }
+                                worker_task.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await worker_task
+                                break
+
+                        if no_image_payload_started_at:
+                            no_image_payload_elapsed = (
+                                time.monotonic() - float(no_image_payload_started_at)
+                            )
+                            if (
+                                no_image_payload_elapsed
+                                >= IMAGE_NO_PAYLOAD_GRACE_SECONDS
+                            ):
+                                retry_status_message = build_no_image_payload_retry_message(
+                                    IMAGE_NO_PAYLOAD_GRACE_SECONDS
+                                )
+                                retry_after_reauth = (
+                                    reauth_attempts < max_auto_reauth_retries
+                                )
+                                append_runtime_log("WARNING", retry_status_message)
+                                yield {
+                                    "type": "status",
+                                    "level": "WARNING",
+                                    "message": retry_status_message,
+                                }
+                                if not retry_after_reauth:
+                                    yield {
+                                        "type": "error",
+                                        "message": retry_status_message,
+                                    }
+                                worker_task.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await worker_task
+                                break
+
+                        queue_wait_timeout = 3.0
+                        if (
+                            prompt_looks_like_image
+                            and not stream_state_has_submission_signal(stream_state)
+                            and stream_state.get("local_send_started_at")
+                        ):
+                            remaining = (
+                                float(stream_state["local_send_started_at"])
+                                + IMAGE_SUBMISSION_GRACE_SECONDS
+                                - time.monotonic()
+                            )
+                            queue_wait_timeout = min(
+                                queue_wait_timeout,
+                                max(0.01, remaining),
+                            )
+                        elif no_image_payload_started_at:
+                            remaining = (
+                                float(no_image_payload_started_at)
+                                + IMAGE_NO_PAYLOAD_GRACE_SECONDS
+                                - time.monotonic()
+                            )
+                            queue_wait_timeout = min(
+                                queue_wait_timeout,
+                                max(0.01, remaining),
+                            )
+                        elif accepted_no_output_started_at:
+                            remaining = (
+                                float(accepted_no_output_started_at)
+                                + IMAGE_ACCEPTED_NO_OUTPUT_SECONDS
+                                - time.monotonic()
+                            )
+                            queue_wait_timeout = min(
+                                queue_wait_timeout,
+                                max(0.01, remaining),
+                            )
+
                         try:
-                            event = await asyncio.wait_for(queue.get(), timeout=3)
+                            event = await asyncio.wait_for(
+                                queue.get(),
+                                timeout=queue_wait_timeout,
+                            )
                         except asyncio.TimeoutError:
                             elapsed = int(time.monotonic() - request_started)
-                            waiting_message = (
-                                f"Still waiting for Gemini after {elapsed}s. No visible output chunk yet."
-                                if not partial_text and not partial_thoughts
-                                else f"Gemini is still working after {elapsed}s."
-                            )
+                            if (
+                                prompt_looks_like_image
+                                and not stream_state_has_submission_signal(stream_state)
+                            ):
+                                waiting_message = (
+                                    "Waiting for Gemini submission confirmation. "
+                                    f"Elapsed {elapsed}s / fail-fast "
+                                    f"{format_seconds_for_status(IMAGE_SUBMISSION_GRACE_SECONDS)}."
+                                )
+                            elif stream_state.get("queueing"):
+                                waiting_message = (
+                                    f"Gemini accepted the request and is still queueing after {elapsed}s."
+                                )
+                            elif no_image_payload_started_at:
+                                waiting_message = (
+                                    "Gemini sent text/thoughts but no image payload yet. "
+                                    f"Elapsed {elapsed}s / retry guard "
+                                    f"{format_seconds_for_status(IMAGE_NO_PAYLOAD_GRACE_SECONDS)}."
+                                )
+                            elif accepted_no_output_started_at:
+                                waiting_message = (
+                                    "Gemini accepted the request, but no image/text output is visible yet. "
+                                    f"Elapsed {elapsed}s / retry guard "
+                                    f"{format_seconds_for_status(IMAGE_ACCEPTED_NO_OUTPUT_SECONDS)}."
+                                )
+                            else:
+                                waiting_message = (
+                                    f"Still waiting for Gemini after {elapsed}s. No visible output chunk yet."
+                                    if not partial_text and not partial_thoughts
+                                    else f"Gemini is still working after {elapsed}s."
+                                )
                             yield {
                                 "type": "heartbeat",
                                 "message": waiting_message,
@@ -2398,10 +2925,11 @@ class GeminiLocalService:
 
                         yield event
                 finally:
-                    await worker_task
+                    with suppress(asyncio.CancelledError):
+                        await worker_task
                     self._cleanup_input_files(request_dir)
 
-            if retry_after_reauth and reauth_attempts < MAX_AUTO_REAUTH_RETRIES:
+            if retry_after_reauth and reauth_attempts < max_auto_reauth_retries:
                 await self.reprobe_auth(force=True)
                 reauth_attempts += 1
                 yield {

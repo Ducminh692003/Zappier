@@ -1,6 +1,7 @@
 import asyncio
 import codecs
 import io
+import os
 import random
 import time
 import secrets
@@ -68,6 +69,7 @@ from .utils import (
     upload_file,
     logger,
 )
+from .utils.http_session import resolve_browser_impersonate, resolve_gemini_proxy
 
 
 class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
@@ -235,6 +237,8 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 self.configured_cookie_fingerprint = build_cookie_fingerprint(
                     self.cookies
                 )
+                session_kwargs = dict(self.kwargs)
+                verify = session_kwargs.pop("verify", True)
                 (
                     access_token,
                     build_label,
@@ -246,7 +250,8 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                     base_cookies=self.cookies,
                     proxy=self.proxy,
                     verbose=self.verbose,
-                    verify=self.kwargs.get("verify", True),
+                    verify=verify,
+                    **session_kwargs,
                 )
 
                 session.timeout = timeout
@@ -286,6 +291,12 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                     self.account_status = account_status
 
                 logger.success("Gemini client initialized successfully.")
+                if self.verbose:
+                    logger.debug(
+                        "curl_cffi session profile: "
+                        f"impersonate={resolve_browser_impersonate(self.kwargs.get('impersonate'))}, "
+                        f"proxy={'configured' if resolve_gemini_proxy(self.proxy) else 'direct/trust_env'}"
+                    )
             except Exception:
                 await self.close()
                 raise
@@ -567,6 +578,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
         temporary: bool = False,
         deep_research: bool = False,
         use_pro: bool = False,
+        stream_state: dict[str, Any] | None = None,
         **kwargs,
     ) -> ModelOutput:
         """
@@ -658,6 +670,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 session_state=session_state,
                 deep_research=deep_research,
                 use_pro=use_pro,
+                stream_state=stream_state,
                 **kwargs,
             ):
                 pass
@@ -689,6 +702,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
         temporary: bool = False,
         deep_research: bool = False,
         use_pro: bool = False,
+        stream_state: dict[str, Any] | None = None,
         **kwargs,
     ) -> AsyncGenerator[ModelOutput, None]:
         """
@@ -772,6 +786,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 session_state=session_state,
                 deep_research=deep_research,
                 use_pro=use_pro,
+                stream_state=stream_state,
                 **kwargs,
             ):
                 yield output
@@ -798,6 +813,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
         session_state: dict[str, Any] | None = None,
         deep_research: bool = False,
         use_pro: bool = False,
+        stream_state: dict[str, Any] | None = None,
         **kwargs,
     ) -> AsyncGenerator[ModelOutput, None]:
         """
@@ -822,6 +838,30 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
         _reqid = self._reqid
         self._reqid += 100000
 
+        def _update_stream_state(
+            *,
+            submission_signal: bool = False,
+            submission_reason: str | None = None,
+            **updates,
+        ) -> None:
+            if stream_state is None:
+                return
+
+            now = time.monotonic()
+            stream_state.update(updates)
+            stream_state["last_update_at"] = now
+            stream_state["request_id"] = _reqid
+            if submission_signal:
+                stream_state["submission_seen"] = True
+                stream_state.setdefault("submitted_at", now)
+                if submission_reason:
+                    stream_state["submission_reason"] = submission_reason
+
+        if stream_state is not None:
+            stream_state.setdefault("started_at", time.monotonic())
+            stream_state.setdefault("submission_seen", False)
+            stream_state["request_id"] = _reqid
+
         gem_id = gem.id if isinstance(gem, Gem) else gem
 
         chat_backup: dict[str, Any] | None = None
@@ -845,6 +885,36 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
 
         has_generated_text = False
         sleep_time = 10
+
+        def _model_output_has_visible_payload(output: ModelOutput) -> bool:
+            return bool(
+                (getattr(output, "text", "") or "").strip()
+                or (getattr(output, "text_delta", "") or "").strip()
+                or (getattr(output, "thoughts", "") or "").strip()
+                or (getattr(output, "thoughts_delta", "") or "").strip()
+                or list(getattr(output, "images", None) or [])
+                or list(getattr(output, "videos", None) or [])
+                or list(getattr(output, "media", None) or [])
+                or getattr(output, "deep_research_plan", None)
+            )
+
+        def _dump_raw_stream_debug(reason: str, raw_response: str) -> None:
+            if not os.getenv("GEMINI_DEBUG_RAW_STREAM"):
+                return
+            try:
+                debug_dir = Path(
+                    os.getenv("GEMINI_DEBUG_RAW_STREAM_DIR", "temp/gemini_raw_streams")
+                )
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                safe_reason = "".join(
+                    ch if ch.isalnum() or ch in {"-", "_"} else "_"
+                    for ch in reason
+                )[:80]
+                target = debug_dir / f"{int(time.time())}_{_reqid}_{safe_reason}.txt"
+                target.write_text(raw_response, encoding="utf-8", errors="replace")
+                logger.debug(f"[Debug] Saved raw Gemini stream to {target}.")
+            except Exception as exc:
+                logger.debug(f"[Debug] Failed to save raw Gemini stream: {exc}")
 
         message_content = [
             prompt,
@@ -932,6 +1002,10 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                         logger.debug(
                             f"HTTP Request: POST {Endpoint.GENERATE} [{response.status_code}]"
                         )
+                    _update_stream_state(
+                        http_stream_opened=True,
+                        http_status=response.status_code,
+                    )
                     if response.status_code != 200:
                         await self.close()
                         raise APIError(
@@ -1004,6 +1078,10 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                             if isinstance(status, list) and status:
                                 if not is_thinking:
                                     is_queueing = True
+                                    _update_stream_state(
+                                        queueing=True,
+                                        thinking=False,
+                                    )
                                     if not has_candidates:
                                         logger.debug(
                                             "Model is in a waiting state (queueing)..."
@@ -1021,6 +1099,15 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                             cid = _new_cid
                                         if _new_rid:
                                             rid = _new_rid
+                                        _update_stream_state(
+                                            submission_signal=bool(_new_cid),
+                                            submission_reason=(
+                                                "cid" if _new_cid else "metadata"
+                                            ),
+                                            metadata_seen=True,
+                                            cid=cid,
+                                            rid=rid,
+                                        )
 
                                         if isinstance(chat, ChatSession):
                                             chat.metadata = m_data
@@ -1034,6 +1121,13 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                     ):
                                         is_thinking = True
                                         is_queueing = False
+                                        _update_stream_state(
+                                            submission_signal=True,
+                                            submission_reason="tool_activity",
+                                            tool_name=tool_name,
+                                            thinking=True,
+                                            queueing=False,
+                                        )
                                         if not has_candidates:
                                             logger.debug(
                                                 f"Model is active (tool: {tool_name})..."
@@ -1044,6 +1138,13 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                         is_final_chunk = True
                                         is_thinking = False
                                         is_queueing = False
+                                        _update_stream_state(
+                                            submission_signal=True,
+                                            submission_reason="final_context",
+                                            final_chunk=True,
+                                            thinking=False,
+                                            queueing=False,
+                                        )
                                         if isinstance(chat, ChatSession):
                                             chat.metadata = [None] * 9 + [context_str]
 
@@ -1066,6 +1167,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                     )
                                     if candidates_list:
                                         output_candidates = []
+                                        visible_output_seen = False
                                         for i, candidate_data in enumerate(
                                             candidates_list
                                         ):
@@ -1192,7 +1294,9 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                                 new_full_thought = ""
 
                                             if (
-                                                text_delta
+                                                text
+                                                or thoughts
+                                                or text_delta
                                                 or thoughts_delta
                                                 or web_images
                                                 or generated_images
@@ -1201,6 +1305,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                                 or deep_research_plan
                                             ):
                                                 has_candidates = True
+                                                visible_output_seen = True
 
                                             # Update state with the provider's cleaned state to handle drift
                                             last_texts[rcid] = last_texts[
@@ -1229,6 +1334,38 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                         if output_candidates:
                                             is_thinking = False
                                             is_queueing = False
+                                            stream_state_updates = {
+                                                "candidate_seen": True,
+                                                "thinking": False,
+                                                "queueing": False,
+                                                "cid": cid,
+                                                "rid": rid,
+                                            }
+                                            if visible_output_seen:
+                                                stream_state_updates[
+                                                    "output_seen"
+                                                ] = True
+                                                stream_state_updates[
+                                                    "visible_output_seen"
+                                                ] = True
+                                            if (
+                                                web_images
+                                                or generated_images
+                                                or generated_videos
+                                                or generated_media
+                                            ):
+                                                stream_state_updates[
+                                                    "image_payload_seen"
+                                                ] = True
+                                            _update_stream_state(
+                                                submission_signal=True,
+                                                submission_reason=(
+                                                    "output"
+                                                    if visible_output_seen
+                                                    else "candidate"
+                                                ),
+                                                **stream_state_updates,
+                                            )
                                             yield ModelOutput(
                                                 metadata=[cid, rid],
                                                 candidates=output_candidates,
@@ -1255,13 +1392,20 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                         decoded_chunk = decoder.decode(chunk, final=False)
                         buffer += decoded_chunk
                         _raw_response += decoded_chunk
+                        if decoded_chunk:
+                            _update_stream_state(raw_chunk_seen=True)
                         if buffer.startswith(")]}'"):
                             buffer = buffer[4:].lstrip()
                         parsed_parts, buffer = parse_response_by_frame(buffer)
+                        if parsed_parts:
+                            _update_stream_state(
+                                frame_seen=True,
+                            )
 
                         got_update = False
                         async for out in _process_parts(parsed_parts):
-                            has_generated_text = True
+                            if _model_output_has_visible_payload(out):
+                                has_generated_text = True
                             yield out
                             got_update = True
 
@@ -1290,23 +1434,27 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                     if buffer:
                         parsed_parts, _ = parse_response_by_frame(buffer)
                         async for out in _process_parts(parsed_parts):
-                            has_generated_text = True
+                            if _model_output_has_visible_payload(out):
+                                has_generated_text = True
                             yield out
 
                     if not is_completed or is_thinking or is_queueing:
-                        if (
-                            cid and is_final_chunk
-                        ):  # The conversation can only be recovered if Gemini has saved the context.
+                        if cid:
+                            _dump_raw_stream_debug("incomplete_recovery", _raw_response)
                             logger.debug(
-                                f"Stream incomplete. Checking conversation history for {cid}..."
+                                "Stream incomplete. Checking conversation history for "
+                                f"{cid} (final_chunk={is_final_chunk})..."
                             )
 
                             poll_start_time = time.time()
+                            recovery_timeout = self.timeout
+                            if not is_final_chunk and not has_generated_text:
+                                recovery_timeout = min(self.timeout, 30.0)
 
                             while True:
-                                if (time.time() - poll_start_time) > self.timeout:
+                                if (time.time() - poll_start_time) > recovery_timeout:
                                     logger.warning(
-                                        f"[Recovery] Polling for {cid} timed out after {self.timeout}s."
+                                        f"[Recovery] Polling for {cid} timed out after {recovery_timeout}s."
                                     )
                                     await self.close()
                                     if has_generated_text:
@@ -1315,9 +1463,20 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                             "Please try sending your prompt again."
                                         )
                                     else:
-                                        raise APIError(
-                                            "read_chat polling timed out waiting for the model to finish. "
-                                            "The original request may have been silently aborted by Google."
+                                        _update_stream_state(
+                                            history_recovery_failed=True,
+                                            recovery_timed_out=True,
+                                            cid=cid,
+                                            rid=rid,
+                                            final_chunk=is_final_chunk,
+                                        )
+                                        raise StreamSuspendedError(
+                                            "Gemini assigned a CID but did not commit the response to history before recovery timed out.",
+                                            completed=is_completed,
+                                            final_chunk=is_final_chunk,
+                                            thinking=is_thinking,
+                                            queueing=is_queueing,
+                                            request_id=_reqid,
                                         )
                                 await self._send_bard_activity()
                                 recovered_history = await self.read_chat(cid)
@@ -1374,6 +1533,13 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                 f"No CID found to recover. (Request ID: {_reqid})"
                             )
                             logger.debug(suspended_message)
+                            _update_stream_state(
+                                suspended=True,
+                                completed=is_completed,
+                                final_chunk=is_final_chunk,
+                                thinking=is_thinking,
+                                queueing=is_queueing,
+                            )
                             raise StreamSuspendedError(
                                 "The original request may have been silently aborted by Google.",
                                 completed=is_completed,
@@ -1789,6 +1955,7 @@ class ChatSession:
         temporary: bool = False,
         deep_research: bool = False,
         use_pro: bool = False,
+        stream_state: dict[str, Any] | None = None,
         **kwargs,
     ) -> ModelOutput:
         """
@@ -1838,6 +2005,7 @@ class ChatSession:
             temporary=temporary,
             deep_research=deep_research,
             use_pro=use_pro,
+            stream_state=stream_state,
             **kwargs,
         )
 
@@ -1848,6 +2016,7 @@ class ChatSession:
         temporary: bool = False,
         deep_research: bool = False,
         use_pro: bool = False,
+        stream_state: dict[str, Any] | None = None,
         **kwargs,
     ) -> AsyncGenerator[ModelOutput, None]:
         """
@@ -1886,6 +2055,7 @@ class ChatSession:
             temporary=temporary,
             deep_research=deep_research,
             use_pro=use_pro,
+            stream_state=stream_state,
             **kwargs,
         ):
             yield output

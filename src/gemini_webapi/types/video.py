@@ -10,6 +10,7 @@ from curl_cffi.requests.exceptions import HTTPError
 from pydantic import BaseModel, ConfigDict
 
 from ..constants import Headers
+from ..utils.http_session import create_gemini_session
 from ..utils import logger
 
 
@@ -89,11 +90,9 @@ class Video(BaseModel):
         if not req_client:
             client_ref = getattr(self, "client_ref", None)
             cookies = getattr(client_ref, "cookies", None) if client_ref else None
-            req_client = AsyncSession(
-                impersonate="chrome",
-                allow_redirects=True,
-                cookies=cookies,
+            req_client = create_gemini_session(
                 proxy=self.proxy,
+                cookies=cookies,
             )
             close_client = True
 
